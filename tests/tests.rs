@@ -37,12 +37,13 @@ static ANSWER5: Lazy<H256> = Lazy::new(|| {
     H256::from_str("0x28bba5b45246aa3d6cce32f5fcdf718c63fed4225d795f84ecb0e00a0df4e205").unwrap()
 });
 
-fn with_temp_db(f: impl for<'env, 'a> FnOnce(&'a mut MutableTransaction<'env>) -> ()) -> () {
+fn with_temp_db<T>(f: impl for<'env, 'a> FnOnce(&'a mut MutableTransaction<'env>) -> T) -> T {
     let dir = tempfile::tempdir().unwrap();
-    let db = DB::open(dir.path()).unwrap();
+    let db = DB::create(dir.path(), false).unwrap();
     let mut txn = db.begin_mutable().unwrap();
-    f(&mut txn);
-    drop(dir);
+    let res = f(&mut txn);
+    dir.close().unwrap();
+    res
 }
 
 fn do_test<'env>(txn: &mut MutableTransaction<'env>) {

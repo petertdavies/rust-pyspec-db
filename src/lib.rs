@@ -222,14 +222,40 @@ pub struct DB {
 
 impl DB {
     pub fn open(path: &std::path::Path) -> anyhow::Result<Self> {
+        Self::open_internal(path, true, false)
+    }
+
+    pub fn create(path: &std::path::Path, allow_existing: bool) -> anyhow::Result<Self> {
+        Self::open_internal(path, allow_existing, true)
+    }
+
+    fn open_internal(
+        path: &std::path::Path,
+        allow_existing: bool,
+        create_if_not_existing: bool,
+    ) -> anyhow::Result<Self> {
+        assert!(allow_existing || create_if_not_existing);
         std::fs::create_dir_all(path)?;
         let env = Environment::new()
             .set_map_size(usize::pow(2, 40))
             .open(path)?;
-        let db = env.create_db(None, DatabaseFlags::empty())?;
+        let db = if create_if_not_existing {
+            env.create_db(None, DatabaseFlags::empty())?
+        } else {
+            env.open_db(None)?
+        };
         let res = DB { env, db };
-        // Check Version
+
         let mut tx = res.begin_mutable()?;
+        match tx.get_metadata(b"version")? {
+            None => anyhow::ensure!(create_if_not_existing, "Database missing version"),
+            Some(version) => anyhow::ensure!(
+                version == DB_VERSION,
+                "Wrong DB_VERSION expected: {:?}, got: {:?}",
+                DB_VERSION,
+                version,
+            ),
+        }
         tx.set_metadata(b"version", DB_VERSION)?;
         tx.commit()?;
         Ok(res)
@@ -254,9 +280,19 @@ pub struct MutableTransaction<'db> {
 }
 
 impl<'db> MutableTransaction<'db> {
+    pub fn get_metadata(&self, key: &[u8]) -> anyhow::Result<Option<&[u8]>> {
+        let mut db_key = vec![0];
+        db_key.extend_from_slice(key);
+        match self.txn.get(self.db, &db_key) {
+            Ok(val) => Ok(Some(val)),
+            Err(lmdb::Error::NotFound) => Ok(None),
+            Err(err) => Err(err)?,
+        }
+    }
+
     pub fn set_metadata(&mut self, key: &[u8], val: &[u8]) -> anyhow::Result<()> {
         let mut db_key = vec![0];
-        db_key.extend(key);
+        db_key.extend_from_slice(key);
         self.txn.put(self.db, &db_key, &val, WriteFlags::empty())?;
         Ok(())
     }
@@ -303,6 +339,7 @@ impl<'db> MutableTransaction<'db> {
             for (address, account) in self.accounts.iter() {
                 let mut key: Vec<u8> = Vec::new();
                 key.extend_from_slice(b"\x01");
+                // The get internal key here is a bug that originated in the Python version
                 key.extend_from_slice(&get_internal_key(address));
                 match account {
                     Some(account) => {
