@@ -191,7 +191,7 @@ impl<'db> MutableTransaction<'db> {
                         let value = rlp::encode(account);
                         cursor.put(&key, &value, WriteFlags::empty())?;
                     }
-                    None => cursor_delete(&cursor, key)?,
+                    None => cursor_delete(&mut cursor, key)?,
                 }
             }
 
@@ -203,7 +203,7 @@ impl<'db> MutableTransaction<'db> {
                     db_key.extend_from_slice(b"\x00");
                     db_key.extend_from_slice(key.as_bytes());
                     if value.is_zero() {
-                        cursor_delete(&cursor, db_key)?
+                        cursor_delete(&mut cursor, db_key)?
                     } else {
                         cursor.put(&db_key, &rlp::encode(value), WriteFlags::empty())?;
                     }

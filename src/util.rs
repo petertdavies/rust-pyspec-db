@@ -1,5 +1,5 @@
 use ethereum_types::H256;
-use lmdb::Cursor;
+use lmdb::{Cursor, RwCursor, WriteFlags};
 use lmdb_sys::MDB_SET_KEY;
 use sha3::{Digest, Keccak256};
 
@@ -24,12 +24,12 @@ pub fn cursor_get<'txn>(
 }
 
 pub fn cursor_delete<'txn>(
-    cursor: &impl Cursor<'txn>,
+    cursor: &mut RwCursor<'txn>,
     key: impl AsRef<[u8]>,
 ) -> Result<(), lmdb::Error> {
     let res = cursor.get(Some(key.as_ref()), None, MDB_SET_KEY);
     match res {
-        Ok((_, _)) => Ok(()),
+        Ok((_, _)) => cursor.del(WriteFlags::empty()),
         Err(lmdb::Error::NotFound) => Ok(()),
         Err(err) => Err(err),
     }
