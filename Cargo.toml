@@ -14,4 +14,7 @@ rlp = "0.5.1"
 sha3 = "0.10.0"
 
 [dev-dependencies]
+ethereum-trie = "0.5.0"
+rand = "0.8.5"
+rand_chacha = "0.3.1"
 tempfile = "3.2.0"

@@ -1,41 +1,64 @@
+pub mod check_trie;
+pub mod get_prefix;
+
+use ethereum_pyspec_db::util::keccak256;
 use ethereum_pyspec_db::*;
-use ethereum_types::{H160, H256, U256};
+use ethereum_types::{Address, H256, U256};
 use once_cell::sync::Lazy;
+use rand::{seq::IteratorRandom, Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
+use rlp;
+use std::collections::HashMap;
 use std::str::FromStr;
 use tempfile;
 
-static ADDRESS1: Lazy<H160> =
-    Lazy::new(|| H160::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap());
-static ADDRESS2: Lazy<H160> =
-    Lazy::new(|| H160::from_str("0x4ddc2d193948926d02f9b1fe9e1daa0718270ed5").unwrap());
-static ADDRESS3: Lazy<H160> =
-    Lazy::new(|| H160::from_str("0xa4dd6831114ec700000000000000000000000000").unwrap());
-static ADDRESS4: Lazy<H160> =
-    Lazy::new(|| H160::from_str("0xe417fbeebc1e9700000000000000000000000000").unwrap());
-static ADDRESS5: Lazy<H160> =
-    Lazy::new(|| H160::from_str("0x5c16fd151ae56edc8c5e01c49b45c8c207a82511").unwrap());
+use crate::get_prefix::{get_address_from_index, get_address_with_prefix_nibbles};
 
-static EMPTY_ACCOUNT: Account = Account {
-    nonce: 0,
+static ACCOUNT1: Account = Account {
+    nonce: 1,
     balance: U256::zero(),
     code: vec![],
 };
 
-static ANSWER1: Lazy<H256> = Lazy::new(|| {
-    H256::from_str("0x4cf55af8e7cfddcc5be0795045819faf282068e6ba942b533274ace4bed32e85").unwrap()
-});
-static ANSWER2: Lazy<H256> = Lazy::new(|| {
-    H256::from_str("0x2cb15015542c039ae73a869953c73f9eb06724676282bea1984496e44dbe601f").unwrap()
-});
-static ANSWER3: Lazy<H256> = Lazy::new(|| {
-    H256::from_str("0x8b393a6f0892d429f7ccbba51ed5eebee861df8567647b974532346574ce6029").unwrap()
-});
-static ANSWER4: Lazy<H256> = Lazy::new(|| {
-    H256::from_str("0x258a030250335c068fe1f04162ae22c2c42132178926d47871231707d7538b9a").unwrap()
-});
-static ANSWER5: Lazy<H256> = Lazy::new(|| {
-    H256::from_str("0x28bba5b45246aa3d6cce32f5fcdf718c63fed4225d795f84ecb0e00a0df4e205").unwrap()
-});
+static ACCOUNT2: Account = Account {
+    nonce: 2,
+    balance: U256::zero(),
+    code: vec![],
+};
+
+static TESTS: &[&[(&[u8], Option<&Account>)]] = &[
+    &[],
+    &[(&[0, 0, 1, 1, 1, 1], Some(&ACCOUNT1))],
+    &[(&[0, 0, 1, 1, 1, 1], Some(&ACCOUNT2))],
+    &[(&[0, 0, 1, 1, 1, 1], None)],
+    &[
+        (&[1, 0, 1, 1, 0, 0], Some(&ACCOUNT1)),
+        (&[1, 0, 1, 1, 0, 1], Some(&ACCOUNT1)),
+    ],
+    &[(&[1, 0, 2, 0, 0, 0], Some(&ACCOUNT1))],
+    &[(&[1, 0, 1, 1, 1, 1], None)],
+    &[
+        (&[1, 0, 1, 1, 1, 2], Some(&ACCOUNT1)),
+        (&[1, 0, 1, 1, 1, 3], Some(&ACCOUNT1)),
+    ],
+    &[
+        (&[1, 0, 1, 1, 0, 0], None),
+        (&[1, 0, 1, 1, 0, 1], None),
+        (&[1, 0, 1, 1, 1, 2], None),
+        (&[1, 0, 1, 1, 1, 3], None),
+    ],
+    &[
+        (&[2, 0, 0, 0, 0, 0], Some(&ACCOUNT1)),
+        (&[2, 0, 0, 0, 1, 0], Some(&ACCOUNT1)),
+    ],
+    &[(&[2, 0, 0, 0, 1, 0], Some(&ACCOUNT2))],
+    &[
+        (&[3, 0, 0, 0, 0, 0], Some(&ACCOUNT1)),
+        (&[3, 0, 0, 0, 0, 1], Some(&ACCOUNT1)),
+        (&[3, 0, 0, 1, 0, 0], Some(&ACCOUNT1)),
+    ],
+    &[(&[3, 0, 0, 1, 0, 0], None)],
+];
 
 fn with_temp_db<T>(f: impl for<'env, 'a> FnOnce(&'a mut MutableTransaction<'env>) -> T) -> T {
     let dir = tempfile::tempdir().unwrap();
@@ -46,31 +69,82 @@ fn with_temp_db<T>(f: impl for<'env, 'a> FnOnce(&'a mut MutableTransaction<'env>
     res
 }
 
-fn do_test<'env>(txn: &mut MutableTransaction<'env>) {
-    assert_eq!(txn.state_root().unwrap(), *EMPTY_TRIE_ROOT);
-    txn.set_account(*ADDRESS1, Some(EMPTY_ACCOUNT.clone()));
-    assert_eq!(txn.state_root().unwrap(), *ANSWER1);
-    txn.set_account(*ADDRESS2, Some(EMPTY_ACCOUNT.clone()));
-    assert_eq!(txn.state_root().unwrap(), *ANSWER2);
-    txn.set_account(*ADDRESS3, Some(EMPTY_ACCOUNT.clone()));
-    assert_eq!(txn.state_root().unwrap(), *ANSWER3);
-    txn.set_account(*ADDRESS4, Some(EMPTY_ACCOUNT.clone()));
-    assert_eq!(txn.state_root().unwrap(), *ANSWER4);
-    txn.set_account(*ADDRESS5, Some(EMPTY_ACCOUNT.clone()));
-    assert_eq!(txn.state_root().unwrap(), *ANSWER5);
-    txn.set_account(*ADDRESS5, None);
-    assert_eq!(txn.state_root().unwrap(), *ANSWER4);
-    txn.set_account(*ADDRESS4, None);
-    assert_eq!(txn.state_root().unwrap(), *ANSWER3);
-    txn.set_account(*ADDRESS3, None);
-    assert_eq!(txn.state_root().unwrap(), *ANSWER2);
-    txn.set_account(*ADDRESS2, None);
-    assert_eq!(txn.state_root().unwrap(), *ANSWER1);
-    txn.set_account(*ADDRESS1, None);
-    assert_eq!(txn.state_root().unwrap(), *EMPTY_TRIE_ROOT);
+fn do_tests<'env>(txn: &mut MutableTransaction<'env>) {
+    let mut trie_contents = HashMap::<Address, Account>::new();
+    for test in TESTS {
+        println!("{:?}", test);
+        for (prefix_nibbles, account) in *test {
+            let address = get_address_with_prefix_nibbles(prefix_nibbles);
+            txn.set_account(address, account.cloned());
+            if let Some(account) = account {
+                trie_contents.insert(address, (*account).clone());
+            } else {
+                trie_contents.remove(&address);
+            }
+        }
+        assert_eq!(
+            txn.state_root().unwrap(),
+            check_trie::calc_root(&trie_contents)
+        );
+    }
 }
 
 #[test]
 fn test() {
-    with_temp_db(do_test)
+    with_temp_db(do_tests)
+}
+
+#[test]
+fn random_test() {
+    return;
+    with_temp_db(do_random_tests);
+}
+
+fn do_random_tests<'env>(txn: &mut MutableTransaction<'env>) {
+    // Use a deterministic RNG
+    let mut rng = ChaCha8Rng::seed_from_u64(0);
+    let mut trie_contents = HashMap::<Address, Account>::new();
+    for _ in 0..100 {
+        while rng.gen_bool(0.75) {
+            let (address, account) = gen_op(&trie_contents, &mut rng);
+            println!("{:?} {:?}", keccak256(address), account);
+            txn.set_account(address, account.clone());
+            if let Some(account) = account {
+                trie_contents.insert(address, account);
+            } else {
+                trie_contents.remove(&address);
+            }
+        }
+        println!("{:?}", trie_contents);
+        assert_eq!(
+            txn.state_root().unwrap(),
+            check_trie::calc_root(&trie_contents)
+        );
+    }
+}
+
+fn gen_op(
+    trie_contents: &HashMap<Address, Account>,
+    rng: &mut impl Rng,
+) -> (Address, Option<Account>) {
+    if trie_contents.len() == 0 || rng.gen_bool(0.5) {
+        let index = rng.gen_range(0..=get_prefix::MAX_INDEX);
+        let account = Some(if rng.gen_bool(0.5) {
+            ACCOUNT1.clone()
+        } else {
+            ACCOUNT2.clone()
+        });
+        (get_address_from_index(index), account)
+    } else {
+        let address = trie_contents.keys().choose(rng).unwrap();
+        if rng.gen_bool(0.5) {
+            (*address, None)
+        } else {
+            if trie_contents[address] == ACCOUNT1 {
+                (*address, Some(ACCOUNT2.clone()))
+            } else {
+                (*address, Some(ACCOUNT1.clone()))
+            }
+        }
+    }
 }
