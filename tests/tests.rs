@@ -72,7 +72,6 @@ fn with_temp_db<T>(f: impl for<'env, 'a> FnOnce(&'a mut MutableTransaction<'env>
 fn do_tests<'env>(txn: &mut MutableTransaction<'env>) {
     let mut trie_contents = HashMap::<Address, Account>::new();
     for test in TESTS {
-        println!("{:?}", test);
         for (prefix_nibbles, account) in *test {
             let address = get_address_with_prefix_nibbles(prefix_nibbles);
             txn.set_account(address, account.cloned());
@@ -96,26 +95,28 @@ fn test() {
 
 #[test]
 fn random_test() {
-    return;
     with_temp_db(do_random_tests);
 }
+
+const NUM_RANDOM_TESTS: usize = 1000;
 
 fn do_random_tests<'env>(txn: &mut MutableTransaction<'env>) {
     // Use a deterministic RNG
     let mut rng = ChaCha8Rng::seed_from_u64(0);
     let mut trie_contents = HashMap::<Address, Account>::new();
-    for _ in 0..100 {
-        while rng.gen_bool(0.75) {
+    for _ in 0..NUM_RANDOM_TESTS {
+        loop {
             let (address, account) = gen_op(&trie_contents, &mut rng);
-            println!("{:?} {:?}", keccak256(address), account);
             txn.set_account(address, account.clone());
             if let Some(account) = account {
                 trie_contents.insert(address, account);
             } else {
                 trie_contents.remove(&address);
             }
+            if rng.gen_bool(0.75) {
+                break;
+            }
         }
-        println!("{:?}", trie_contents);
         assert_eq!(
             txn.state_root().unwrap(),
             check_trie::calc_root(&trie_contents)
@@ -127,7 +128,7 @@ fn gen_op(
     trie_contents: &HashMap<Address, Account>,
     rng: &mut impl Rng,
 ) -> (Address, Option<Account>) {
-    if trie_contents.len() == 0 || rng.gen_bool(0.5) {
+    if trie_contents.len() == 0 || rng.gen_bool(0.4) {
         let index = rng.gen_range(0..=get_prefix::MAX_INDEX);
         let account = Some(if rng.gen_bool(0.5) {
             ACCOUNT1.clone()
