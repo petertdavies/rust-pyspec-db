@@ -6,6 +6,7 @@ use lmdb::{
     Database, DatabaseFlags, Environment, RwCursor, RwTransaction, Transaction, WriteFlags,
 };
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
+use smallvec::SmallVec;
 use std::collections::HashMap;
 
 use crate::util::{cursor_delete, get_internal_key, keccak256};
@@ -210,7 +211,7 @@ impl<'db> MutableTransaction<'db> {
                 }
             }
 
-            let mut dirty_storage: HashMap<Vec<u8>, Vec<(Vec<u8>, Option<Vec<u8>>)>> =
+            let mut dirty_storage: HashMap<[u8; 64], Vec<([u8; 64], Option<SmallVec<[u8; 36]>>)>> =
                 HashMap::new();
             for (address, storage) in self.storage.iter() {
                 let vec = dirty_storage.entry(get_internal_key(address)).or_default();
@@ -218,7 +219,10 @@ impl<'db> MutableTransaction<'db> {
                     if value.is_zero() {
                         vec.push((get_internal_key(key), None));
                     } else {
-                        vec.push((get_internal_key(key), Some(rlp::encode(value).to_vec())));
+                        vec.push((
+                            get_internal_key(key),
+                            Some(SmallVec::from_slice(&rlp::encode(value))),
+                        ));
                     }
                 }
                 vec.sort_unstable_by(|x, y| y.0.cmp(&x.0))
@@ -241,7 +245,7 @@ impl<'db> MutableTransaction<'db> {
                         .append(&account.balance)
                         .append(&walker.root()?)
                         .append(&keccak256(&account.code));
-                    dirty_list.push((internal_address, Some(s.out().to_vec())));
+                    dirty_list.push((internal_address, Some(SmallVec::from_slice(&s.out()))));
                 } else {
                     dirty_list.push((internal_address, None));
                 }

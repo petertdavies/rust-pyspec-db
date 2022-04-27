@@ -1,9 +1,11 @@
+use arrayvec::ArrayVec;
 use ethereum_types::H256;
 use lmdb::{RwCursor, WriteFlags};
 use once_cell::sync::Lazy;
 use rlp;
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use sha3::{Digest, Keccak256};
+use smallvec::SmallVec;
 use std::str::FromStr;
 use std::vec::Vec;
 
@@ -18,15 +20,15 @@ pub static EMPTY_TRIE_ROOT: Lazy<H256> = Lazy::new(|| {
 #[derive(Debug, Clone)]
 enum InternalNode {
     Leaf {
-        rest_of_key: Vec<u8>,
-        value: Vec<u8>,
+        rest_of_key: ArrayVec<u8, 64>,
+        value: SmallVec<[u8; 36]>,
     },
     Extension {
-        key_segment: Vec<u8>,
-        subnode: Vec<u8>,
+        key_segment: SmallVec<[u8; 16]>,
+        subnode: ArrayVec<u8, 32>,
     },
     Branch {
-        subnodes: Vec<Option<Vec<u8>>>,
+        subnodes: Vec<Option<ArrayVec<u8, 32>>>,
     },
 }
 
@@ -36,14 +38,14 @@ impl Encodable for InternalNode {
             InternalNode::Leaf { rest_of_key, value } => s
                 .begin_list(2)
                 .append(&encode_nibble_list(rest_of_key, true))
-                .append(value),
+                .append(&value.as_slice()),
             InternalNode::Extension {
                 key_segment,
                 subnode,
             } => s
                 .begin_list(2)
                 .append(&encode_nibble_list(key_segment, false))
-                .append(subnode),
+                .append(&subnode.as_slice()),
             InternalNode::Branch { subnodes } => {
                 s.begin_list(17);
                 for subnode in subnodes {
@@ -55,7 +57,7 @@ impl Encodable for InternalNode {
                             if data.len() < 32 {
                                 s.append_raw(data, 1);
                             } else {
-                                s.append(data);
+                                s.append(&data.as_slice());
                             }
                         }
                     };
@@ -72,18 +74,18 @@ impl Decodable for InternalNode {
             let (key_segment, is_leaf) = decode_nibble_list(rlp.at(0)?.data()?);
             if is_leaf {
                 Ok(InternalNode::Leaf {
-                    rest_of_key: key_segment,
-                    value: rlp.val_at(1)?,
+                    rest_of_key: ArrayVec::try_from(&*key_segment).unwrap(),
+                    value: SmallVec::from_slice(rlp.at(1)?.data()?),
                 })
             } else {
                 Ok(InternalNode::Extension {
-                    key_segment,
+                    key_segment: SmallVec::from_slice(&key_segment),
                     subnode: {
                         let subnode_rlp = rlp.at(1)?;
                         if subnode_rlp.is_data() {
-                            subnode_rlp.data()?.to_vec()
+                            ArrayVec::try_from(subnode_rlp.data()?).unwrap()
                         } else {
-                            subnode_rlp.as_raw().to_vec()
+                            ArrayVec::try_from(subnode_rlp.as_raw()).unwrap()
                         }
                     },
                 })
@@ -92,12 +94,12 @@ impl Decodable for InternalNode {
             assert_eq!(rlp.item_count()?, 17);
             let mut subnodes = Vec::new();
             for i in 0..16 {
-                let vec: Vec<u8> = {
+                let vec: ArrayVec<u8, 32> = {
                     let subnode_rlp = rlp.at(i)?;
                     if subnode_rlp.is_data() {
-                        subnode_rlp.data()?.to_vec()
+                        ArrayVec::try_from(subnode_rlp.data()?).unwrap()
                     } else {
-                        subnode_rlp.as_raw().to_vec()
+                        ArrayVec::try_from(subnode_rlp.as_raw()).unwrap()
                     }
                 };
                 if vec.len() == 0 {
@@ -113,7 +115,7 @@ impl Decodable for InternalNode {
 
 pub struct Walker<'db, 'txn> {
     prefix_len: usize,
-    dirty_list: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    dirty_list: Vec<([u8; 64], Option<SmallVec<[u8; 36]>>)>,
     cursor: &'txn mut RwCursor<'db>,
     buffer: [u8; 128],
 }
@@ -121,7 +123,7 @@ pub struct Walker<'db, 'txn> {
 impl<'db, 'txn> Walker<'db, 'txn> {
     pub fn new(
         trie_prefix: &[u8],
-        dirty_list: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+        dirty_list: Vec<([u8; 64], Option<SmallVec<[u8; 36]>>)>,
         cursor: &'txn mut RwCursor<'db>,
     ) -> Self {
         let mut buffer: [u8; 128] = [0; 128];
@@ -135,6 +137,7 @@ impl<'db, 'txn> Walker<'db, 'txn> {
     }
 
     pub fn root(&mut self) -> anyhow::Result<H256> {
+        println!("{:?}", std::mem::size_of::<InternalNode>());
         let root_node = self.walk(0)?;
         let root = self.write_node(0, root_node)?;
         Ok(match root {
@@ -183,7 +186,7 @@ impl<'db, 'txn> Walker<'db, 'txn> {
         Ok(match value {
             None => None,
             Some(value) => Some(InternalNode::Leaf {
-                rest_of_key: key[depth..].to_vec(),
+                rest_of_key: ArrayVec::try_from(&key[depth..]).unwrap(),
                 value,
             }),
         })
@@ -191,8 +194,8 @@ impl<'db, 'txn> Walker<'db, 'txn> {
     fn walk_leaf(
         &mut self,
         depth: usize,
-        rest_of_key: Vec<u8>,
-        value: Vec<u8>,
+        rest_of_key: ArrayVec<u8, 64>,
+        value: SmallVec<[u8; 36]>,
     ) -> anyhow::Result<Option<InternalNode>> {
         let (key, new_value) = self.dirty_list.last().unwrap().clone();
         debug_assert!(key.starts_with(&self.buffer[self.prefix_len..self.prefix_len + depth]));
@@ -209,7 +212,7 @@ impl<'db, 'txn> Walker<'db, 'txn> {
             }
         } else {
             let leaf_node = Some(InternalNode::Leaf {
-                rest_of_key: rest_of_key[common_prefix_len + 1..].to_vec(),
+                rest_of_key: ArrayVec::try_from(&rest_of_key[common_prefix_len + 1..]).unwrap(),
                 value,
             });
             self.buffer[self.prefix_len + depth..self.prefix_len + depth + common_prefix_len]
@@ -225,8 +228,8 @@ impl<'db, 'txn> Walker<'db, 'txn> {
     fn walk_extension(
         &mut self,
         depth: usize,
-        key_segment: Vec<u8>,
-        subnode: Vec<u8>,
+        key_segment: SmallVec<[u8; 16]>,
+        subnode: ArrayVec<u8, 32>,
     ) -> anyhow::Result<Option<InternalNode>> {
         debug_assert_ne!(key_segment.len(), 0);
         self.buffer[self.prefix_len + depth..self.prefix_len + depth + key_segment.len()]
@@ -249,7 +252,7 @@ impl<'db, 'txn> Walker<'db, 'txn> {
             self.walk_branch(depth + common_prefix_len, subnodes)?
         } else {
             let extension_node = Some(InternalNode::Extension {
-                key_segment: key_segment[common_prefix_len + 1..].to_vec(),
+                key_segment: SmallVec::from_slice(&key_segment[common_prefix_len + 1..]),
                 subnode,
             });
             self.make_branch(depth + common_prefix_len, index, extension_node)?
@@ -260,7 +263,7 @@ impl<'db, 'txn> Walker<'db, 'txn> {
     fn walk_branch(
         &mut self,
         depth: usize,
-        mut subnodes: Vec<Option<Vec<u8>>>,
+        mut subnodes: Vec<Option<ArrayVec<u8, 32>>>,
     ) -> anyhow::Result<Option<InternalNode>> {
         self.buffer[self.prefix_len + depth] = 0;
         while self.dirty_list.last().map_or(false, |(k, _)| {
@@ -319,10 +322,11 @@ impl<'db, 'txn> Walker<'db, 'txn> {
             }
             Some(InternalNode::Leaf { rest_of_key, value }) => {
                 self.write_node(depth + segment_len, None)?;
-                let mut new_rest_of_key = self.buffer
-                    [self.prefix_len + depth..self.prefix_len + depth + segment_len]
-                    .to_vec();
-                new_rest_of_key.extend_from_slice(&rest_of_key);
+                let mut new_rest_of_key = ArrayVec::try_from(
+                    &self.buffer[self.prefix_len + depth..self.prefix_len + depth + segment_len],
+                )
+                .unwrap();
+                new_rest_of_key.try_extend_from_slice(&rest_of_key).unwrap();
                 Some(InternalNode::Leaf {
                     rest_of_key: new_rest_of_key,
                     value,
@@ -333,9 +337,9 @@ impl<'db, 'txn> Walker<'db, 'txn> {
                 subnode,
             }) => {
                 self.write_node(depth + segment_len, None)?;
-                let mut new_segment = self.buffer
-                    [self.prefix_len + depth..self.prefix_len + depth + segment_len]
-                    .to_vec();
+                let mut new_segment = SmallVec::from_slice(
+                    &self.buffer[self.prefix_len + depth..self.prefix_len + depth + segment_len],
+                );
                 new_segment.extend_from_slice(&key_segment);
                 Some(InternalNode::Extension {
                     key_segment: new_segment,
@@ -343,9 +347,9 @@ impl<'db, 'txn> Walker<'db, 'txn> {
                 })
             }
             Some(branch_node @ InternalNode::Branch { .. }) => Some(InternalNode::Extension {
-                key_segment: self.buffer
-                    [self.prefix_len + depth..self.prefix_len + depth + segment_len]
-                    .to_vec(),
+                key_segment: SmallVec::from_slice(
+                    &self.buffer[self.prefix_len + depth..self.prefix_len + depth + segment_len],
+                ),
                 subnode: self
                     .write_node(depth + segment_len, Some(branch_node))?
                     .unwrap(),
@@ -364,7 +368,7 @@ impl<'db, 'txn> Walker<'db, 'txn> {
         &mut self,
         depth: usize,
         node: Option<InternalNode>,
-    ) -> anyhow::Result<Option<Vec<u8>>> {
+    ) -> anyhow::Result<Option<ArrayVec<u8, 32>>> {
         Ok(match node {
             None => {
                 cursor_delete(self.cursor, &self.buffer[..self.prefix_len + depth])?;
@@ -378,9 +382,9 @@ impl<'db, 'txn> Walker<'db, 'txn> {
                     WriteFlags::empty(),
                 )?;
                 if node_encoding.len() < 32 {
-                    Some(node_encoding.to_vec())
+                    Some(ArrayVec::try_from(&*node_encoding).unwrap())
                 } else {
-                    Some(Keccak256::digest(node_encoding).to_vec())
+                    Some(ArrayVec::try_from(&*Keccak256::digest(node_encoding)).unwrap())
                 }
             }
         })

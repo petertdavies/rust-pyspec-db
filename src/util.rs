@@ -65,12 +65,14 @@ pub fn decode_nibble_list(bytes: &[u8]) -> (Vec<u8>, bool) {
     (res, is_leaf)
 }
 
-pub fn get_internal_key(bytes: impl AsRef<[u8]>) -> Vec<u8> {
+pub fn get_internal_key(bytes: impl AsRef<[u8]>) -> [u8; 64] {
     let hash = keccak256(bytes);
-    let mut res = Vec::new();
+    let mut res = [0; 64];
+    let mut i = 0;
     for byte in hash.as_bytes() {
-        res.push(byte >> 4);
-        res.push(byte & 0x0F);
+        res[i] = byte >> 4;
+        res[i + 1] = byte & 0x0F;
+        i += 2;
     }
     res
 }
