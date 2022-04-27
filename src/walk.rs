@@ -112,15 +112,31 @@ impl Decodable for InternalNode {
 }
 
 pub struct Walker<'db, 'txn> {
-    pub trie_prefix: Vec<u8>,
-    pub dirty_list: Vec<(Vec<u8>, Option<Vec<u8>>)>,
-    pub cursor: &'txn mut RwCursor<'db>,
+    prefix_len: usize,
+    dirty_list: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    cursor: &'txn mut RwCursor<'db>,
+    buffer: [u8; 128],
 }
 
 impl<'db, 'txn> Walker<'db, 'txn> {
+    pub fn new(
+        trie_prefix: &[u8],
+        dirty_list: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+        cursor: &'txn mut RwCursor<'db>,
+    ) -> Self {
+        let mut buffer: [u8; 128] = [0; 128];
+        buffer[..trie_prefix.len()].copy_from_slice(trie_prefix);
+        Walker {
+            prefix_len: trie_prefix.len(),
+            dirty_list,
+            cursor,
+            buffer,
+        }
+    }
+
     pub fn root(&mut self) -> anyhow::Result<H256> {
-        let root_node = self.walk(&[])?;
-        let root = self.write_node(&[], root_node)?;
+        let root_node = self.walk(0)?;
+        let root = self.write_node(0, root_node)?;
         Ok(match root {
             Some(root) => {
                 if root.len() < 32 {
@@ -133,58 +149,54 @@ impl<'db, 'txn> Walker<'db, 'txn> {
         })
     }
 
-    fn walk(&mut self, node_prefix: &[u8]) -> anyhow::Result<Option<InternalNode>> {
-        let node: Option<InternalNode> = self.get_node(node_prefix)?;
-        self.walk_node(node_prefix, node)
+    fn walk(&mut self, depth: usize) -> anyhow::Result<Option<InternalNode>> {
+        let node: Option<InternalNode> = self.get_node(depth)?;
+        self.walk_node(depth, node)
     }
 
     fn walk_node(
         &mut self,
-        node_prefix: &[u8],
+        depth: usize,
         mut current_node: Option<InternalNode>,
     ) -> anyhow::Result<Option<InternalNode>> {
-        while self
-            .dirty_list
-            .last()
-            .map_or(false, |(k, _)| k.starts_with(node_prefix))
-        {
+        while self.dirty_list.last().map_or(false, |(k, _)| {
+            k.starts_with(&self.buffer[self.prefix_len..self.prefix_len + depth])
+        }) {
             current_node = match current_node {
-                None => self.walk_empty(node_prefix)?,
+                None => self.walk_empty(depth)?,
                 Some(InternalNode::Leaf { rest_of_key, value }) => {
-                    self.walk_leaf(node_prefix, rest_of_key, value)?
+                    self.walk_leaf(depth, rest_of_key, value)?
                 }
                 Some(InternalNode::Extension {
                     key_segment,
                     subnode,
-                }) => self.walk_extension(node_prefix, key_segment, subnode)?,
-                Some(InternalNode::Branch { subnodes }) => {
-                    self.walk_branch(node_prefix, subnodes)?
-                }
+                }) => self.walk_extension(depth, key_segment, subnode)?,
+                Some(InternalNode::Branch { subnodes }) => self.walk_branch(depth, subnodes)?,
             }
         }
         Ok(current_node)
     }
 
-    fn walk_empty(&mut self, node_prefix: &[u8]) -> anyhow::Result<Option<InternalNode>> {
+    fn walk_empty(&mut self, depth: usize) -> anyhow::Result<Option<InternalNode>> {
         let (key, value) = self.dirty_list.pop().unwrap();
-        debug_assert!(key.starts_with(node_prefix));
+        debug_assert!(key.starts_with(&self.buffer[self.prefix_len..self.prefix_len + depth]));
         Ok(match value {
             None => None,
             Some(value) => Some(InternalNode::Leaf {
-                rest_of_key: key[node_prefix.len()..].to_vec(),
+                rest_of_key: key[depth..].to_vec(),
                 value,
             }),
         })
     }
     fn walk_leaf(
         &mut self,
-        node_prefix: &[u8],
+        depth: usize,
         rest_of_key: Vec<u8>,
         value: Vec<u8>,
     ) -> anyhow::Result<Option<InternalNode>> {
         let (key, new_value) = self.dirty_list.last().unwrap().clone();
-        debug_assert!(key.starts_with(node_prefix));
-        let common_prefix_len = common_prefix(&rest_of_key, &key[node_prefix.len()..]);
+        debug_assert!(key.starts_with(&self.buffer[self.prefix_len..self.prefix_len + depth]));
+        let common_prefix_len = common_prefix(&rest_of_key, &key[depth..]);
         Ok(if common_prefix_len == rest_of_key.len() {
             // Both keys are the same
             self.dirty_list.pop();
@@ -200,68 +212,65 @@ impl<'db, 'txn> Walker<'db, 'txn> {
                 rest_of_key: rest_of_key[common_prefix_len + 1..].to_vec(),
                 value,
             });
+            self.buffer[self.prefix_len + depth..self.prefix_len + depth + common_prefix_len]
+                .copy_from_slice(&key[depth..depth + common_prefix_len]);
             let branch_node = self.make_branch(
-                &key[..node_prefix.len() + common_prefix_len],
+                depth + common_prefix_len,
                 rest_of_key[common_prefix_len],
                 leaf_node,
             )?;
-            self.make_extension(node_prefix, &rest_of_key[..common_prefix_len], branch_node)?
+            self.make_extension(depth, common_prefix_len, branch_node)?
         })
     }
     fn walk_extension(
         &mut self,
-        node_prefix: &[u8],
+        depth: usize,
         key_segment: Vec<u8>,
         subnode: Vec<u8>,
     ) -> anyhow::Result<Option<InternalNode>> {
-        assert_ne!(key_segment.len(), 0);
+        debug_assert_ne!(key_segment.len(), 0);
+        self.buffer[self.prefix_len + depth..self.prefix_len + depth + key_segment.len()]
+            .copy_from_slice(&key_segment);
         let (key, _) = self.dirty_list.last().unwrap().clone();
-        debug_assert!(key.starts_with(node_prefix));
-        let common_prefix_len = common_prefix(&key_segment, &key[node_prefix.len()..]);
+        debug_assert!(key.starts_with(&self.buffer[self.prefix_len..self.prefix_len + depth]));
+        let common_prefix_len = common_prefix(&key_segment, &key[depth..]);
         if common_prefix_len == key_segment.len() {
-            let new_subnode = self.walk(&key[..node_prefix.len() + key_segment.len()])?;
-            return self.make_extension(node_prefix, &key_segment, new_subnode);
+            let new_subnode = self.walk(depth + key_segment.len())?;
+            return self.make_extension(depth, key_segment.len(), new_subnode);
         }
-        let (segment1, index, segment2) = (
-            &key_segment[..common_prefix_len],
+        let (segment1_len, index, segment2_len) = (
+            common_prefix_len,
             key_segment[common_prefix_len],
-            &key_segment[common_prefix_len + 1..],
+            key_segment.len() - common_prefix_len - 1,
         );
-        let branch_node = if segment2.len() == 0 {
+        let branch_node = if segment2_len == 0 {
             let mut subnodes = vec![None; 16];
             subnodes[index as usize] = Some(subnode);
-            self.walk_branch(&key[..node_prefix.len() + common_prefix_len], subnodes)?
+            self.walk_branch(depth + common_prefix_len, subnodes)?
         } else {
             let extension_node = Some(InternalNode::Extension {
-                key_segment: segment2.to_vec(),
+                key_segment: key_segment[common_prefix_len + 1..].to_vec(),
                 subnode,
             });
-            self.make_branch(
-                &key[..node_prefix.len() + common_prefix_len],
-                index,
-                extension_node,
-            )?
+            self.make_branch(depth + common_prefix_len, index, extension_node)?
         };
-        self.make_extension(node_prefix, segment1, branch_node)
+        self.make_extension(depth, segment1_len, branch_node)
     }
 
     fn walk_branch(
         &mut self,
-        node_prefix: &[u8],
+        depth: usize,
         mut subnodes: Vec<Option<Vec<u8>>>,
     ) -> anyhow::Result<Option<InternalNode>> {
-        let mut prefix = node_prefix.to_vec();
-        prefix.push(0);
-        while self
-            .dirty_list
-            .last()
-            .map_or(false, |(k, _)| k.starts_with(node_prefix))
-        {
+        self.buffer[self.prefix_len + depth] = 0;
+        while self.dirty_list.last().map_or(false, |(k, _)| {
+            k.starts_with(&self.buffer[self.prefix_len..self.prefix_len + depth])
+        }) {
             let (key, _) = self.dirty_list.last().unwrap();
-            let index = key[node_prefix.len()];
-            prefix[node_prefix.len()] = index;
-            let subnode = self.walk(&prefix)?;
-            subnodes[index as usize] = self.write_node(&prefix, subnode)?;
+            let index = key[depth];
+            self.buffer[self.prefix_len + depth] = index;
+            let subnode = self.walk(depth + 1)?;
+            subnodes[index as usize] = self.write_node(depth + 1, subnode)?;
         }
 
         let mut num_subnodes = 0;
@@ -275,49 +284,44 @@ impl<'db, 'txn> Walker<'db, 'txn> {
         Ok(if num_subnodes == 0 {
             None
         } else if num_subnodes == 1 {
-            let mut key = node_prefix.to_vec();
-            key.push(subnode_index);
-            self.make_extension(
-                node_prefix,
-                std::slice::from_ref(&subnode_index),
-                self.get_node(&key)?,
-            )?
+            self.buffer[self.prefix_len + depth] = subnode_index;
+            self.make_extension(depth, 1, self.get_node(depth + 1)?)?
         } else {
             Some(InternalNode::Branch { subnodes })
         })
     }
+
     fn make_branch(
         &mut self,
-        node_prefix: &[u8],
+        depth: usize,
         index: u8,
         node: Option<InternalNode>,
     ) -> anyhow::Result<Option<InternalNode>> {
         let mut subnodes = vec![None; 16];
-        let mut subnode_prefix = node_prefix.to_vec();
-        subnode_prefix.push(index);
-        subnodes[index as usize] = self.write_node(&subnode_prefix, node)?;
-        self.walk_branch(node_prefix, subnodes)
+        self.buffer[self.prefix_len + depth] = index;
+        subnodes[index as usize] = self.write_node(depth + 1, node)?;
+        self.walk_branch(depth, subnodes)
     }
 
     fn make_extension(
         &mut self,
-        source: &[u8],
-        segment: &[u8],
+        depth: usize,
+        segment_len: usize,
         node: Option<InternalNode>,
     ) -> anyhow::Result<Option<InternalNode>> {
-        if segment.len() == 0 {
+        if segment_len == 0 {
             return Ok(node);
         }
-        let mut target = source.to_vec();
-        target.extend_from_slice(segment);
         Ok(match node {
             None => {
-                self.write_node(&target, None)?;
+                self.write_node(depth + segment_len, None)?;
                 None
             }
             Some(InternalNode::Leaf { rest_of_key, value }) => {
-                self.write_node(&target, None)?;
-                let mut new_rest_of_key = segment.to_vec();
+                self.write_node(depth + segment_len, None)?;
+                let mut new_rest_of_key = self.buffer
+                    [self.prefix_len + depth..self.prefix_len + depth + segment_len]
+                    .to_vec();
                 new_rest_of_key.extend_from_slice(&rest_of_key);
                 Some(InternalNode::Leaf {
                     rest_of_key: new_rest_of_key,
@@ -328,8 +332,10 @@ impl<'db, 'txn> Walker<'db, 'txn> {
                 key_segment,
                 subnode,
             }) => {
-                self.write_node(&target, None)?;
-                let mut new_segment = segment.to_vec();
+                self.write_node(depth + segment_len, None)?;
+                let mut new_segment = self.buffer
+                    [self.prefix_len + depth..self.prefix_len + depth + segment_len]
+                    .to_vec();
                 new_segment.extend_from_slice(&key_segment);
                 Some(InternalNode::Extension {
                     key_segment: new_segment,
@@ -337,16 +343,18 @@ impl<'db, 'txn> Walker<'db, 'txn> {
                 })
             }
             Some(branch_node @ InternalNode::Branch { .. }) => Some(InternalNode::Extension {
-                key_segment: segment.to_vec(),
-                subnode: self.write_node(&target, Some(branch_node))?.unwrap(),
+                key_segment: self.buffer
+                    [self.prefix_len + depth..self.prefix_len + depth + segment_len]
+                    .to_vec(),
+                subnode: self
+                    .write_node(depth + segment_len, Some(branch_node))?
+                    .unwrap(),
             }),
         })
     }
 
-    fn get_node(&self, node_prefix: &[u8]) -> anyhow::Result<Option<InternalNode>> {
-        let mut key = self.trie_prefix.to_vec();
-        key.extend(node_prefix);
-        cursor_get(self.cursor, key)?
+    fn get_node(&self, depth: usize) -> anyhow::Result<Option<InternalNode>> {
+        cursor_get(self.cursor, &self.buffer[..self.prefix_len + depth])?
             .map(rlp::decode)
             .transpose()
             .map_err(anyhow::Error::new)
@@ -354,19 +362,21 @@ impl<'db, 'txn> Walker<'db, 'txn> {
 
     fn write_node(
         &mut self,
-        node_prefix: &[u8],
+        depth: usize,
         node: Option<InternalNode>,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        let mut key = self.trie_prefix.clone();
-        key.extend_from_slice(node_prefix);
         Ok(match node {
             None => {
-                cursor_delete(self.cursor, key)?;
+                cursor_delete(self.cursor, &self.buffer[..self.prefix_len + depth])?;
                 None
             }
             Some(node) => {
                 let node_encoding = rlp::encode(&node);
-                self.cursor.put(&key, &node_encoding, WriteFlags::empty())?;
+                self.cursor.put(
+                    &&self.buffer[..self.prefix_len + depth],
+                    &node_encoding,
+                    WriteFlags::empty(),
+                )?;
                 if node_encoding.len() < 32 {
                     Some(node_encoding.to_vec())
                 } else {

@@ -231,11 +231,11 @@ impl<'db> MutableTransaction<'db> {
                     let mut trie_prefix = vec![2];
                     trie_prefix.extend_from_slice(&get_internal_key(address));
                     trie_prefix.push(0);
-                    let mut walker = Walker {
-                        trie_prefix,
-                        dirty_list: dirty_storage.remove(&internal_address).unwrap_or_default(),
-                        cursor: &mut cursor,
-                    };
+                    let mut walker = Walker::new(
+                        &trie_prefix,
+                        dirty_storage.remove(&internal_address).unwrap_or_default(),
+                        &mut cursor,
+                    );
                     let mut s = RlpStream::new_list(4);
                     s.append(&account.nonce)
                         .append(&account.balance)
@@ -248,11 +248,7 @@ impl<'db> MutableTransaction<'db> {
             }
             dirty_list.sort_unstable_by(|x, y| y.0.cmp(&x.0));
 
-            let mut walker: Walker = Walker {
-                trie_prefix: vec![2],
-                dirty_list,
-                cursor: &mut cursor,
-            };
+            let mut walker: Walker = Walker::new(std::slice::from_ref(&2), dirty_list, &mut cursor);
 
             let root = walker.root()?;
 
