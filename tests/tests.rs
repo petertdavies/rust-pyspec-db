@@ -1,15 +1,11 @@
 pub mod check_trie;
 pub mod get_prefix;
 
-use ethereum_pyspec_db::util::keccak256;
 use ethereum_pyspec_db::*;
-use ethereum_types::{Address, H256, U256};
-use once_cell::sync::Lazy;
+use ethereum_types::{Address, U256};
 use rand::{seq::IteratorRandom, Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use rlp;
 use std::collections::HashMap;
-use std::str::FromStr;
 use tempfile;
 
 use crate::get_prefix::{get_address_from_index, get_address_with_prefix_nibbles};
@@ -128,6 +124,7 @@ fn gen_op(
     trie_contents: &HashMap<Address, Account>,
     rng: &mut impl Rng,
 ) -> (Address, Option<Account>) {
+    // Slight bias towards deleting to avoid tries with only branch nodes
     if trie_contents.len() == 0 || rng.gen_bool(0.4) {
         let index = rng.gen_range(0..=get_prefix::MAX_INDEX);
         let account = Some(if rng.gen_bool(0.5) {

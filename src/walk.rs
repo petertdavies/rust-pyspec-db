@@ -137,7 +137,6 @@ impl<'db, 'txn> Walker<'db, 'txn> {
     }
 
     pub fn root(&mut self) -> anyhow::Result<H256> {
-        println!("{:?}", std::mem::size_of::<InternalNode>());
         let root_node = self.walk(0)?;
         let root = self.write_node(0, root_node)?;
         Ok(match root {
