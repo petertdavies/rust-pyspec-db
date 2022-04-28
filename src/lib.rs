@@ -134,10 +134,10 @@ impl<'db> MutableTransaction<'db> {
         if let Some(account) = self.accounts.get(&address) {
             Ok(account.clone())
         } else {
-            let mut db_key = vec![0];
+            let mut db_key = vec![1];
             db_key.extend_from_slice(&get_internal_key(address));
             match self.txn.get(self.db, &db_key) {
-                Ok(bytes) => Ok(rlp::decode(bytes)?),
+                Ok(bytes) => Ok(Some(rlp::decode(bytes)?)),
                 Err(lmdb::Error::NotFound) => Ok(None),
                 Err(err) => Err(err)?,
             }
@@ -152,7 +152,8 @@ impl<'db> MutableTransaction<'db> {
             let account = self.get_account_optional(address)?;
             anyhow::ensure!(
                 account.is_some(),
-                "Attempted to set storage on non-existent account"
+                "Attempted to set storage on non-existent account {:?}",
+                address
             );
             self.set_account(address, account);
             let mut map = HashMap::new();
