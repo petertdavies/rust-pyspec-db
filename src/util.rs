@@ -1,6 +1,6 @@
 use ethereum_types::H256;
 use lmdb::{Cursor, RwCursor, WriteFlags};
-use lmdb_sys::MDB_SET_KEY;
+use lmdb_sys::{MDB_FIRST, MDB_GET_CURRENT, MDB_NEXT, MDB_SET_KEY, MDB_SET_RANGE};
 use sha3::{Digest, Keccak256};
 
 pub fn keccak256(data: impl AsRef<[u8]>) -> H256 {
@@ -33,6 +33,41 @@ pub fn cursor_delete<'txn>(
         Err(lmdb::Error::NotFound) => Ok(()),
         Err(err) => Err(err),
     }
+}
+
+pub fn cursor_clear_prefix<'txn>(
+    cursor: &mut RwCursor,
+    prefix: impl AsRef<[u8]>,
+) -> Result<(), lmdb::Error> {
+    let mut current_key = match cursor.get(Some(prefix.as_ref()), None, MDB_SET_RANGE) {
+        Ok((key, _)) => key.unwrap(),
+        Err(lmdb::Error::NotFound) => return Ok(()),
+        Err(err) => Err(err)?,
+    };
+    while current_key.starts_with(prefix.as_ref()) {
+        cursor.del(WriteFlags::empty())?;
+        current_key = match cursor.get(None, None, MDB_NEXT) {
+            Ok((key, _)) => key.unwrap(),
+            Err(lmdb::Error::NotFound) => return Ok(()),
+            Err(err) => Err(err)?,
+        };
+    }
+    Ok(())
+}
+
+pub fn cursor_dump_db<'txn>(cursor: &impl Cursor<'txn>) -> Result<(), lmdb::Error> {
+    println!("==Start DB dump==");
+    let (mut key, mut val) = cursor.get(None, None, MDB_FIRST)?;
+    loop {
+        println!("{:?} {:?}", key.unwrap(), val);
+        (key, val) = match cursor.get(None, None, MDB_NEXT) {
+            Ok(x) => x,
+            Err(lmdb::Error::NotFound) => break,
+            Err(err) => Err(err)?,
+        };
+    }
+    println!("==End DB dump==");
+    Ok(())
 }
 
 pub fn encode_nibble_list(nibble_list: &[u8], is_leaf: bool) -> Vec<u8> {

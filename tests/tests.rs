@@ -113,6 +113,7 @@ fn do_random_tests<'env>(txn: &mut MutableTransaction<'env>) {
                 break;
             }
         }
+
         assert_eq!(
             txn.state_root().unwrap(),
             check_trie::calc_root(&trie_contents)

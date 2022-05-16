@@ -7,9 +7,11 @@ use lmdb::{
 };
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use smallvec::SmallVec;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::util::{cursor_delete, get_internal_key, keccak256};
+use crate::util::{
+    cursor_clear_prefix, cursor_delete, cursor_dump_db, get_internal_key, keccak256,
+};
 use crate::walk::Walker;
 
 static DB_VERSION: &[u8] = b"2";
@@ -97,6 +99,7 @@ impl DB {
             txn,
             accounts: HashMap::new(),
             storage: HashMap::new(),
+            destroyed_storage: HashSet::new(),
         })
     }
 }
@@ -106,6 +109,7 @@ pub struct MutableTransaction<'db> {
     txn: RwTransaction<'db>,
     accounts: HashMap<H160, Option<Account>>,
     storage: HashMap<H160, HashMap<H256, U256>>,
+    destroyed_storage: HashSet<H160>,
 }
 
 impl<'db> MutableTransaction<'db> {
@@ -180,71 +184,66 @@ impl<'db> MutableTransaction<'db> {
         }
     }
 
+    pub fn destroy_storage(&mut self, address: H160) {
+        self.destroyed_storage.insert(address);
+        self.storage.remove(&address);
+    }
+
     pub fn state_root(&mut self) -> anyhow::Result<H256> {
         {
-            let mut cursor = self.txn.open_rw_cursor(self.db)?;
-            for (address, account) in self.accounts.iter() {
-                let mut key: Vec<u8> = Vec::new();
-                key.extend_from_slice(b"\x01");
-                // The get internal key here is a bug that originated in the Python version
-                key.extend_from_slice(&get_internal_key(address));
-                match account {
-                    Some(account) => {
-                        let value = rlp::encode(account);
-                        cursor.put(&key, &value, WriteFlags::empty())?;
+            {
+                let mut cursor = self.txn.open_rw_cursor(self.db)?;
+                for (address, account) in self.accounts.iter() {
+                    let mut key: Vec<u8> = Vec::new();
+                    key.extend_from_slice(b"\x01");
+                    // The get internal key here is a bug that originated in the Python version
+                    key.extend_from_slice(&get_internal_key(address));
+                    match account {
+                        Some(account) => {
+                            let value = rlp::encode(account);
+                            cursor.put(&key, &value, WriteFlags::empty())?;
+                        }
+                        None => cursor_delete(&mut cursor, key)?,
                     }
-                    None => cursor_delete(&mut cursor, key)?,
                 }
-            }
 
-            for (address, map) in self.storage.iter() {
-                for (key, value) in map.iter() {
-                    let mut db_key: Vec<u8> = Vec::new();
-                    db_key.extend_from_slice(b"\x01");
-                    db_key.extend_from_slice(address.as_bytes());
-                    db_key.extend_from_slice(b"\x00");
-                    db_key.extend_from_slice(key.as_bytes());
-                    if value.is_zero() {
-                        cursor_delete(&mut cursor, db_key)?
-                    } else {
-                        cursor.put(&db_key, &rlp::encode(value), WriteFlags::empty())?;
-                    }
+                for address in self.destroyed_storage.iter() {
+                    let mut db_prefix = Vec::new();
+                    db_prefix.push(1);
+                    db_prefix.extend_from_slice(address.as_bytes());
+                    db_prefix.push(0);
+                    cursor_clear_prefix(&mut cursor, &db_prefix)?;
+                    db_prefix.clear();
+                    db_prefix.push(2);
+                    db_prefix.extend_from_slice(&get_internal_key(address));
+                    db_prefix.push(0);
+                    cursor_clear_prefix(&mut cursor, &db_prefix)?;
                 }
-            }
 
-            let mut dirty_storage: HashMap<[u8; 64], Vec<([u8; 64], Option<SmallVec<[u8; 36]>>)>> =
-                HashMap::new();
-            for (address, storage) in self.storage.iter() {
-                let vec = dirty_storage.entry(get_internal_key(address)).or_default();
-                for (key, value) in storage.iter() {
-                    if value.is_zero() {
-                        vec.push((get_internal_key(key), None));
-                    } else {
-                        vec.push((
-                            get_internal_key(key),
-                            Some(SmallVec::from_slice(&rlp::encode(value))),
-                        ));
+                for (address, map) in self.storage.iter() {
+                    for (key, value) in map.iter() {
+                        let mut db_key: Vec<u8> = Vec::new();
+                        db_key.extend_from_slice(b"\x01");
+                        db_key.extend_from_slice(address.as_bytes());
+                        db_key.extend_from_slice(b"\x00");
+                        db_key.extend_from_slice(key.as_bytes());
+                        if value.is_zero() {
+                            cursor_delete(&mut cursor, db_key)?
+                        } else {
+                            cursor.put(&db_key, &rlp::encode(value), WriteFlags::empty())?;
+                        }
                     }
                 }
-                vec.sort_unstable_by(|x, y| y.0.cmp(&x.0))
             }
 
             let mut dirty_list = Vec::new();
-            for (address, account) in &self.accounts {
+            for (address, account) in std::mem::take(&mut self.accounts) {
                 let internal_address = get_internal_key(address);
                 if let Some(account) = account {
-                    let mut trie_prefix = vec![2];
-                    trie_prefix.extend_from_slice(&get_internal_key(address));
-                    trie_prefix.push(0);
-                    let mut walker = Walker::new(
-                        &trie_prefix,
-                        dirty_storage.remove(&internal_address).unwrap_or_default(),
-                        &mut cursor,
-                    );
                     let mut s = RlpStream::new_list(4);
                     s.append(&account.nonce)
                         .append(&account.balance)
-                        .append(&walker.root()?)
+                        .append(&self.storage_root(&address)?)
                         .append(&keccak256(&account.code));
                     dirty_list.push((internal_address, Some(SmallVec::from_slice(&s.out()))));
                 } else {
@@ -253,6 +252,7 @@ impl<'db> MutableTransaction<'db> {
             }
             dirty_list.sort_unstable_by(|x, y| y.0.cmp(&x.0));
 
+            let mut cursor = self.txn.open_rw_cursor(self.db)?;
             let mut walker: Walker = Walker::new(std::slice::from_ref(&2), dirty_list, &mut cursor);
 
             let root = walker.root()?;
@@ -264,9 +264,38 @@ impl<'db> MutableTransaction<'db> {
         }
     }
 
+    pub fn storage_root(&mut self, address: &H160) -> anyhow::Result<H256> {
+        let storage = self.storage.remove(&address).unwrap_or_default();
+        let mut dirty_storage: Vec<([u8; 64], Option<SmallVec<[u8; 36]>>)> = Vec::new();
+        for (key, value) in storage.iter() {
+            if value.is_zero() {
+                dirty_storage.push((get_internal_key(key), None));
+            } else {
+                dirty_storage.push((
+                    get_internal_key(key),
+                    Some(SmallVec::from_slice(&rlp::encode(value))),
+                ));
+            }
+        }
+        dirty_storage.sort_unstable_by(|x, y| y.0.cmp(&x.0));
+
+        let mut cursor = self.txn.open_rw_cursor(self.db)?;
+        let mut trie_prefix = vec![2];
+        trie_prefix.extend_from_slice(&get_internal_key(address));
+        trie_prefix.push(0);
+        let mut walker = Walker::new(&trie_prefix, dirty_storage, &mut cursor);
+        walker.root()
+    }
+
     pub fn commit(mut self) -> anyhow::Result<()> {
         self.state_root()?;
         self.txn.commit()?;
+        Ok(())
+    }
+
+    pub fn debug_dump_db(&mut self) -> anyhow::Result<()> {
+        let cursor = self.txn.open_ro_cursor(self.db)?;
+        cursor_dump_db(&cursor)?;
         Ok(())
     }
 }
