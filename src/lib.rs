@@ -1,57 +1,25 @@
+pub mod backend;
+pub mod structs;
 pub mod util;
 pub mod walk;
 
 use ethereum_types::{H160, H256, U256};
-use lmdb::{
-    Database, DatabaseFlags, Environment, RwCursor, RwTransaction, Transaction, WriteFlags,
-};
-use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
+use rlp::RlpStream;
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 
-use crate::util::{
-    cursor_clear_prefix, cursor_delete, cursor_dump_db, get_internal_key, keccak256,
-};
+use crate::backend::{Backend, BackendTransaction};
+pub use crate::structs::Account;
+use crate::structs::{get_internal_key, marshal_storage, unmarshal_storage, NibbleList};
+pub use crate::util::{keccak256, EMPTY_CODE_HASH};
 use crate::walk::Walker;
 
-static DB_VERSION: &[u8] = b"2";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Account {
-    pub nonce: u64,
-    pub balance: U256,
-    pub code: Vec<u8>,
-}
-
-impl Encodable for Account {
-    fn rlp_append(&self, s: &mut RlpStream) {
-        s.begin_list(3)
-            .append(&self.nonce)
-            .append(&self.balance)
-            .append(&self.code);
-    }
-}
-
-impl Decodable for Account {
-    fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
-        Ok(Account {
-            nonce: rlp.val_at(0)?,
-            balance: rlp.val_at(1)?,
-            code: rlp.val_at(2)?,
-        })
-    }
-}
-
-trait Node: Sized + Clone {
-    fn make_node(&self, cursor: RwCursor, key: &[u8]) -> anyhow::Result<Vec<u8>>;
-}
-
 pub struct DB {
-    env: lmdb::Environment,
-    db: Database,
+    backend: Backend,
 }
 
 impl DB {
+    /*
     pub fn open(path: &std::path::Path) -> anyhow::Result<Self> {
         Self::open_internal(path, true, false)
     }
@@ -90,13 +58,17 @@ impl DB {
         tx.set_metadata(b"version", DB_VERSION)?;
         tx.commit()?;
         Ok(res)
+    */
+
+    pub fn open_in_memory() -> anyhow::Result<Self> {
+        Ok(Self {
+            backend: Backend::open_in_memory()?,
+        })
     }
 
-    pub fn begin_mutable<'db>(&'db self) -> anyhow::Result<MutableTransaction<'db>> {
-        let txn: lmdb::RwTransaction<'db> = self.env.begin_rw_txn()?;
+    pub fn begin_mutable<'db>(&'db mut self) -> anyhow::Result<MutableTransaction<'db>> {
         Ok(MutableTransaction {
-            db: self.db,
-            txn,
+            tx: self.backend.begin_mutable()?,
             accounts: HashMap::new(),
             storage: HashMap::new(),
             destroyed_storage: HashSet::new(),
@@ -105,8 +77,7 @@ impl DB {
 }
 
 pub struct MutableTransaction<'db> {
-    db: Database,
-    txn: RwTransaction<'db>,
+    tx: BackendTransaction<'db>,
     accounts: HashMap<H160, Option<Account>>,
     storage: HashMap<H160, HashMap<H256, U256>>,
     destroyed_storage: HashSet<H160>,
@@ -116,18 +87,36 @@ impl<'db> MutableTransaction<'db> {
     pub fn get_metadata(&self, key: &[u8]) -> anyhow::Result<Option<&[u8]>> {
         let mut db_key = vec![0];
         db_key.extend_from_slice(key);
-        match self.txn.get(self.db, &db_key) {
-            Ok(val) => Ok(Some(val)),
-            Err(lmdb::Error::NotFound) => Ok(None),
-            Err(err) => Err(err)?,
-        }
+        self.tx.get(&db_key)
     }
 
     pub fn set_metadata(&mut self, key: &[u8], val: &[u8]) -> anyhow::Result<()> {
         let mut db_key = vec![0];
         db_key.extend_from_slice(key);
-        self.txn.put(self.db, &db_key, &val, WriteFlags::empty())?;
+        self.tx.put(&db_key, &val)?;
         Ok(())
+    }
+
+    pub fn store_code(&mut self, code: &[u8]) -> anyhow::Result<H256> {
+        if code.is_empty() {
+            return Ok(*EMPTY_CODE_HASH);
+        }
+        let code_hash = keccak256(code);
+        let mut db_key = vec![3];
+        db_key.extend_from_slice(code_hash.as_bytes());
+        if self.tx.get(&db_key)?.is_none() {
+            self.tx.put(&db_key, code)?;
+        }
+        Ok(code_hash)
+    }
+
+    pub fn get_code(&mut self, code_hash: H256) -> anyhow::Result<Option<&[u8]>> {
+        if code_hash == *EMPTY_CODE_HASH {
+            return Ok(Some(&[]));
+        }
+        let mut db_key = vec![3];
+        db_key.extend_from_slice(code_hash.as_bytes());
+        Ok(self.tx.get(&db_key)?)
     }
 
     pub fn set_account(&mut self, address: H160, account: Option<Account>) {
@@ -139,11 +128,10 @@ impl<'db> MutableTransaction<'db> {
             Ok(account.clone())
         } else {
             let mut db_key = vec![1];
-            db_key.extend_from_slice(&get_internal_key(address));
-            match self.txn.get(self.db, &db_key) {
-                Ok(bytes) => Ok(Some(rlp::decode(bytes)?)),
-                Err(lmdb::Error::NotFound) => Ok(None),
-                Err(err) => Err(err)?,
+            db_key.extend_from_slice(address.as_bytes());
+            match self.tx.get(&db_key)? {
+                None => Ok(None),
+                Some(data) => Ok(Some(Account::unmarshal(data))),
             }
         }
     }
@@ -175,12 +163,10 @@ impl<'db> MutableTransaction<'db> {
         }
         let mut db_key = vec![1];
         db_key.extend_from_slice(address.as_bytes());
-        db_key.extend_from_slice(b"\x00");
         db_key.extend_from_slice(key.as_bytes());
-        match self.txn.get(self.db, &db_key) {
-            Ok(bytes) => Ok(rlp::decode(bytes)?),
-            Err(lmdb::Error::NotFound) => Ok(U256::zero()),
-            Err(err) => Err(err)?,
+        match self.tx.get(&db_key)? {
+            None => Ok(U256::zero()),
+            Some(data) => Ok(unmarshal_storage(data)),
         }
     }
 
@@ -192,45 +178,38 @@ impl<'db> MutableTransaction<'db> {
     pub fn state_root(&mut self) -> anyhow::Result<H256> {
         {
             {
-                let mut cursor = self.txn.open_rw_cursor(self.db)?;
                 for (address, account) in self.accounts.iter() {
-                    let mut key: Vec<u8> = Vec::new();
-                    key.extend_from_slice(b"\x01");
-                    // The get internal key here is a bug that originated in the Python version
-                    key.extend_from_slice(&get_internal_key(address));
+                    let mut key: Vec<u8> = vec![1];
+                    key.extend_from_slice(address.as_bytes());
                     match account {
                         Some(account) => {
-                            let value = rlp::encode(account);
-                            cursor.put(&key, &value, WriteFlags::empty())?;
+                            self.tx.put(&key, &account.marshal())?;
                         }
-                        None => cursor_delete(&mut cursor, key)?,
-                    }
+                        None => self.tx.delete(&key)?,
+                    };
                 }
 
                 for address in self.destroyed_storage.iter() {
                     let mut db_prefix = Vec::new();
                     db_prefix.push(1);
                     db_prefix.extend_from_slice(address.as_bytes());
-                    db_prefix.push(0);
-                    cursor_clear_prefix(&mut cursor, &db_prefix)?;
+                    self.tx.clear_prefix(&db_prefix)?;
                     db_prefix.clear();
                     db_prefix.push(2);
                     db_prefix.extend_from_slice(&get_internal_key(address));
-                    db_prefix.push(0);
-                    cursor_clear_prefix(&mut cursor, &db_prefix)?;
+                    self.tx.clear_prefix(&db_prefix)?;
+                    self.tx.delete(&db_prefix)?;
                 }
 
                 for (address, map) in self.storage.iter() {
                     for (key, value) in map.iter() {
-                        let mut db_key: Vec<u8> = Vec::new();
-                        db_key.extend_from_slice(b"\x01");
+                        let mut db_key: Vec<u8> = vec![1];
                         db_key.extend_from_slice(address.as_bytes());
-                        db_key.extend_from_slice(b"\x00");
                         db_key.extend_from_slice(key.as_bytes());
                         if value.is_zero() {
-                            cursor_delete(&mut cursor, db_key)?
+                            self.tx.delete(&db_key)?
                         } else {
-                            cursor.put(&db_key, &rlp::encode(value), WriteFlags::empty())?;
+                            self.tx.put(&db_key, &marshal_storage(*value))?;
                         }
                     }
                 }
@@ -244,7 +223,7 @@ impl<'db> MutableTransaction<'db> {
                     s.append(&account.nonce)
                         .append(&account.balance)
                         .append(&self.storage_root(&address)?)
-                        .append(&keccak256(&account.code));
+                        .append(&account.code_hash);
                     dirty_list.push((internal_address, Some(SmallVec::from_slice(&s.out()))));
                 } else {
                     dirty_list.push((internal_address, None));
@@ -252,8 +231,8 @@ impl<'db> MutableTransaction<'db> {
             }
             dirty_list.sort_unstable_by(|x, y| y.0.cmp(&x.0));
 
-            let mut cursor = self.txn.open_rw_cursor(self.db)?;
-            let mut walker: Walker = Walker::new(std::slice::from_ref(&2), dirty_list, &mut cursor);
+            let mut walker: Walker =
+                Walker::new(std::slice::from_ref(&2), dirty_list, &mut self.tx);
 
             let root = walker.root()?;
 
@@ -266,7 +245,7 @@ impl<'db> MutableTransaction<'db> {
 
     pub fn storage_root(&mut self, address: &H160) -> anyhow::Result<H256> {
         let storage = self.storage.remove(&address).unwrap_or_default();
-        let mut dirty_storage: Vec<([u8; 64], Option<SmallVec<[u8; 36]>>)> = Vec::new();
+        let mut dirty_storage: Vec<(NibbleList, Option<SmallVec<[u8; 36]>>)> = Vec::new();
         for (key, value) in storage.iter() {
             if value.is_zero() {
                 dirty_storage.push((get_internal_key(key), None));
@@ -279,23 +258,20 @@ impl<'db> MutableTransaction<'db> {
         }
         dirty_storage.sort_unstable_by(|x, y| y.0.cmp(&x.0));
 
-        let mut cursor = self.txn.open_rw_cursor(self.db)?;
         let mut trie_prefix = vec![2];
         trie_prefix.extend_from_slice(&get_internal_key(address));
-        trie_prefix.push(0);
-        let mut walker = Walker::new(&trie_prefix, dirty_storage, &mut cursor);
+        let mut walker = Walker::new(&trie_prefix, dirty_storage, &mut self.tx);
         walker.root()
     }
 
     pub fn commit(mut self) -> anyhow::Result<()> {
         self.state_root()?;
-        self.txn.commit()?;
+        self.tx.commit()?;
         Ok(())
     }
 
     pub fn debug_dump_db(&mut self) -> anyhow::Result<()> {
-        let cursor = self.txn.open_ro_cursor(self.db)?;
-        cursor_dump_db(&cursor)?;
+        self.tx.debug_dump_db();
         Ok(())
     }
 }

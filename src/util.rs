@@ -1,7 +1,8 @@
 use ethereum_types::H256;
-use lmdb::{Cursor, RwCursor, WriteFlags};
-use lmdb_sys::{MDB_FIRST, MDB_GET_CURRENT, MDB_NEXT, MDB_SET_KEY, MDB_SET_RANGE};
+use once_cell::sync::Lazy;
 use sha3::{Digest, Keccak256};
+
+pub static EMPTY_CODE_HASH: Lazy<H256> = Lazy::new(|| keccak256(&[]));
 
 pub fn keccak256(data: impl AsRef<[u8]>) -> H256 {
     H256::from_slice(&Keccak256::digest(data.as_ref()))
@@ -9,105 +10,4 @@ pub fn keccak256(data: impl AsRef<[u8]>) -> H256 {
 
 pub fn common_prefix(xs: &[u8], ys: &[u8]) -> usize {
     xs.iter().zip(ys).take_while(|(x, y)| x == y).count()
-}
-
-pub fn cursor_get<'txn>(
-    cursor: &impl Cursor<'txn>,
-    key: impl AsRef<[u8]>,
-) -> Result<Option<&'txn [u8]>, lmdb::Error> {
-    let res = cursor.get(Some(key.as_ref()), None, MDB_SET_KEY);
-    match res {
-        Ok((_, val)) => Ok(Some(val)),
-        Err(lmdb::Error::NotFound) => Ok(None),
-        Err(err) => Err(err),
-    }
-}
-
-pub fn cursor_delete<'txn>(
-    cursor: &mut RwCursor<'txn>,
-    key: impl AsRef<[u8]>,
-) -> Result<(), lmdb::Error> {
-    let res = cursor.get(Some(key.as_ref()), None, MDB_SET_KEY);
-    match res {
-        Ok((_, _)) => cursor.del(WriteFlags::empty()),
-        Err(lmdb::Error::NotFound) => Ok(()),
-        Err(err) => Err(err),
-    }
-}
-
-pub fn cursor_clear_prefix<'txn>(
-    cursor: &mut RwCursor,
-    prefix: impl AsRef<[u8]>,
-) -> Result<(), lmdb::Error> {
-    let mut current_key = match cursor.get(Some(prefix.as_ref()), None, MDB_SET_RANGE) {
-        Ok((key, _)) => key.unwrap(),
-        Err(lmdb::Error::NotFound) => return Ok(()),
-        Err(err) => Err(err)?,
-    };
-    while current_key.starts_with(prefix.as_ref()) {
-        cursor.del(WriteFlags::empty())?;
-        current_key = match cursor.get(None, None, MDB_NEXT) {
-            Ok((key, _)) => key.unwrap(),
-            Err(lmdb::Error::NotFound) => return Ok(()),
-            Err(err) => Err(err)?,
-        };
-    }
-    Ok(())
-}
-
-pub fn cursor_dump_db<'txn>(cursor: &impl Cursor<'txn>) -> Result<(), lmdb::Error> {
-    println!("==Start DB dump==");
-    let (mut key, mut val) = cursor.get(None, None, MDB_FIRST)?;
-    loop {
-        println!("{:?} {:?}", key.unwrap(), val);
-        (key, val) = match cursor.get(None, None, MDB_NEXT) {
-            Ok(x) => x,
-            Err(lmdb::Error::NotFound) => break,
-            Err(err) => Err(err)?,
-        };
-    }
-    println!("==End DB dump==");
-    Ok(())
-}
-
-pub fn encode_nibble_list(nibble_list: &[u8], is_leaf: bool) -> Vec<u8> {
-    let mut res = Vec::new();
-    if nibble_list.len() % 2 == 0 {
-        res.push(16 * 2 * is_leaf as u8);
-        for i in 0..nibble_list.len() / 2 {
-            res.push(16 * nibble_list[i * 2] + nibble_list[i * 2 + 1]);
-        }
-    } else {
-        res.push(16 * (2 * (is_leaf as u8) + 1) + nibble_list[0]);
-        for i in 0..nibble_list.len() / 2 {
-            res.push(16 * nibble_list[i * 2 + 1] + nibble_list[i * 2 + 2]);
-        }
-    }
-    res
-}
-
-pub fn decode_nibble_list(bytes: &[u8]) -> (Vec<u8>, bool) {
-    let mut res = Vec::new();
-    let parity = bytes[0] & 0x10 != 0;
-    let is_leaf = bytes[0] & 0x20 != 0;
-    if parity {
-        res.push(bytes[0] & 0x0F);
-    }
-    for i in 1..bytes.len() {
-        res.push(bytes[i] >> 4);
-        res.push(bytes[i] & 0x0F);
-    }
-    (res, is_leaf)
-}
-
-pub fn get_internal_key(bytes: impl AsRef<[u8]>) -> [u8; 64] {
-    let hash = keccak256(bytes);
-    let mut res = [0; 64];
-    let mut i = 0;
-    for byte in hash.as_bytes() {
-        res[i] = byte >> 4;
-        res[i + 1] = byte & 0x0F;
-        i += 2;
-    }
-    res
 }

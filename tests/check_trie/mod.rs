@@ -12,7 +12,7 @@ fn encode_account_no_storage(account: &Account) -> Vec<u8> {
     s.append(&account.nonce)
         .append(&account.balance)
         .append(&*EMPTY_TRIE_ROOT)
-        .append(&keccak256(&account.code));
+        .append(&account.code_hash);
     s.out().to_vec()
 }
 
