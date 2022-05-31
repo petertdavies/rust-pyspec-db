@@ -39,12 +39,10 @@ impl<'db, 'txn, 'a> Walker<'a, 'db, 'txn> {
         let root = self.write_node(root_node)?;
         Ok(if root.is_empty() {
             *EMPTY_TRIE_ROOT
+        } else if root.len() < 32 {
+            keccak256(root)
         } else {
-            if root.len() < 32 {
-                keccak256(root)
-            } else {
-                H256::from_slice(&root)
-            }
+            H256::from_slice(&root)
         })
     }
 
@@ -99,13 +97,10 @@ impl<'db, 'txn, 'a> Walker<'a, 'db, 'txn> {
         Ok(if common_prefix_len == rest_of_key.len() {
             // Both keys are the same
             self.dirty_list.pop();
-            match new_value {
-                None => None,
-                Some(new_value) => Some(InternalNode::Leaf {
-                    rest_of_key,
-                    value: new_value,
-                }),
-            }
+            new_value.map(|new_value| InternalNode::Leaf {
+                rest_of_key,
+                value: new_value,
+            })
         } else {
             let leaf_node = Some(InternalNode::Leaf {
                 rest_of_key: ArrayVec::try_from(&rest_of_key[common_prefix_len + 1..]).unwrap(),

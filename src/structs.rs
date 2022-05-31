@@ -5,7 +5,7 @@ use smallvec::SmallVec;
 
 use crate::util::{keccak256, EMPTY_CODE_HASH};
 
-pub type Db_Value = SmallVec<[u8; 64]>;
+pub type DbValue = SmallVec<[u8; 64]>;
 pub type NibbleList = ArrayVec<u8, 64>;
 
 pub fn marshal_nibble_list(nibbles: &[u8]) -> ArrayVec<u8, 33> {
@@ -80,7 +80,7 @@ pub fn get_internal_key(bytes: impl AsRef<[u8]>) -> NibbleList {
 
 fn hash_if_long(data: &[u8]) -> ArrayVec<u8, 32> {
     if data.len() < 32 {
-        ArrayVec::try_from(data.as_ref()).unwrap()
+        ArrayVec::try_from(data).unwrap()
     } else {
         keccak256(data).as_ref().try_into().unwrap()
     }
@@ -99,8 +99,8 @@ pub enum InternalNode {
 }
 
 impl InternalNode {
-    pub fn marshal(&self) -> Db_Value {
-        let mut res = Db_Value::new();
+    pub fn marshal(&self) -> DbValue {
+        let mut res = DbValue::new();
         match self {
             Self::Leaf { rest_of_key, value } => {
                 res.push(0);
@@ -145,11 +145,11 @@ impl InternalNode {
             let subnode_mask =
                 u16::from_be_bytes(data[bytes_consumed..bytes_consumed + 2].try_into().unwrap());
             bytes_consumed += 2;
-            for i in 0..16 {
+            for (i, subnode) in subnodes.iter_mut().enumerate() {
                 if subnode_mask & (1 << i) != 0 {
                     let len = data[bytes_consumed] as usize;
                     bytes_consumed += 1;
-                    subnodes[i] =
+                    *subnode =
                         ArrayVec::try_from(&data[bytes_consumed..bytes_consumed + len]).unwrap();
                     bytes_consumed += len;
                 }
@@ -165,7 +165,7 @@ impl InternalNode {
         match self {
             Self::Leaf { rest_of_key, value } => {
                 let mut s = RlpStream::new_list(2);
-                s.append(&hp_encode_nibble_list(&rest_of_key, true).as_slice())
+                s.append(&hp_encode_nibble_list(rest_of_key, true).as_slice())
                     .append(&value.as_slice());
                 hash_if_long(&s.out())
             }
@@ -177,20 +177,18 @@ impl InternalNode {
                 for subnode in subnodes {
                     if subnode.is_empty() {
                         s.append_empty_data()
+                    } else if subnode.len() < 32 {
+                        s.append_raw(subnode.as_slice(), 1)
                     } else {
-                        if subnode.len() < 32 {
-                            s.append_raw(&subnode.as_slice(), 1)
-                        } else {
-                            s.append(&subnode.as_slice())
-                        }
+                        s.append(&subnode.as_slice())
                     };
                 }
                 s.append_empty_data();
                 let branch_node = hash_if_long(&s.out());
-                if extension_nibbles.len() != 0 {
+                if !extension_nibbles.is_empty() {
                     let mut s = RlpStream::new_list(2);
                     if branch_node.len() < 32 {
-                        s.append_raw(&branch_node.as_slice(), 1);
+                        s.append_raw(branch_node.as_slice(), 1);
                     } else {
                         s.append(&hp_encode_nibble_list(extension_nibbles, false).as_slice())
                             .append(&branch_node.as_slice());
@@ -212,9 +210,9 @@ pub struct Account {
 }
 
 impl Account {
-    pub fn marshal(&self) -> Db_Value {
+    pub fn marshal(&self) -> DbValue {
         debug_assert_ne!(self.code_hash, H256::zero());
-        let mut res = Db_Value::new();
+        let mut res = DbValue::new();
         let nonce_len = 8 - (self.nonce.leading_zeros() / 8) as usize;
         res.push(nonce_len as u8);
         res.extend_from_slice(&self.nonce.to_be_bytes()[8 - nonce_len..]);
@@ -252,10 +250,10 @@ impl Account {
     }
 }
 
-pub fn marshal_storage(value: U256) -> Db_Value {
+pub fn marshal_storage(value: U256) -> DbValue {
     let mut buf = [0; 32];
     value.to_big_endian(&mut buf);
-    Db_Value::from_slice(&buf[(value.leading_zeros() / 8) as usize..])
+    DbValue::from_slice(&buf[(value.leading_zeros() / 8) as usize..])
 }
 
 pub fn unmarshal_storage(data: &[u8]) -> U256 {

@@ -7,8 +7,6 @@ use libmdbx::{Environment, EnvironmentFlags, Geometry, Transaction, WriteFlags, 
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
 
-use crate::structs::InternalNode;
-
 pub struct Backend {
     cache: BTreeMap<ArrayVec<u8, 96>, Option<SmallVec<[u8; 128]>>>,
     disk: Option<Environment<WriteMap>>,
@@ -29,8 +27,8 @@ impl Backend {
             ..EnvironmentFlags::default()
         });
         builder.set_geometry(Geometry {
-            size: Some(0..(2 as usize).pow(40)),
-            growth_step: Some((2 as isize).pow(20)),
+            size: Some(0..(2_usize).pow(40)),
+            growth_step: Some((2_isize).pow(20)),
             ..Geometry::default()
         });
         Ok(Self {
@@ -39,7 +37,7 @@ impl Backend {
         })
     }
 
-    pub fn begin_mutable<'txn>(&'txn mut self) -> anyhow::Result<BackendTransaction<'txn>> {
+    pub fn begin_mutable(&mut self) -> anyhow::Result<BackendTransaction> {
         Ok(match &self.disk {
             None => BackendTransaction {
                 cache: &mut self.cache,
@@ -64,10 +62,7 @@ pub struct BackendTransaction<'txn> {
 impl<'txn> BackendTransaction<'txn> {
     pub fn get(&'txn self, key: &[u8]) -> anyhow::Result<Option<Cow<'txn, [u8]>>> {
         Ok(if let Some(value) = self.cache.get(key) {
-            match value {
-                None => None,
-                Some(value) => Some(Cow::from(value.as_slice())),
-            }
+            value.as_ref().map(|value| Cow::from(value.as_slice()))
         } else {
             match &self.txn {
                 None => None,
@@ -151,7 +146,7 @@ impl<'txn> BackendTransaction<'txn> {
                     if let Some(value) = value {
                         cursor.put(key, value, WriteFlags::default())?;
                     } else {
-                        let x: Option<()> = cursor.set(&key)?;
+                        let x: Option<()> = cursor.set(key)?;
                         if x.is_some() {
                             txn.del(&db, key, None)?;
                         }

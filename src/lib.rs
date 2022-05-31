@@ -48,7 +48,7 @@ impl DB {
         })
     }
 
-    pub fn begin_mutable<'db>(&'db mut self) -> anyhow::Result<MutableTransaction<'db>> {
+    pub fn begin_mutable(&mut self) -> anyhow::Result<MutableTransaction<'_>> {
         Ok(MutableTransaction {
             tx: self.backend.begin_mutable()?,
             accounts: HashMap::new(),
@@ -69,13 +69,13 @@ impl<'db> MutableTransaction<'db> {
     pub fn get_metadata(&self, key: &[u8]) -> anyhow::Result<Option<Cow<[u8]>>> {
         let mut db_key = vec![0];
         db_key.extend_from_slice(key);
-        Ok(self.tx.get(&db_key)?)
+        self.tx.get(&db_key)
     }
 
     pub fn set_metadata(&mut self, key: &[u8], val: &[u8]) -> anyhow::Result<()> {
         let mut db_key = vec![0];
         db_key.extend_from_slice(key);
-        self.tx.put(&db_key, &val)?;
+        self.tx.put(&db_key, val)?;
         Ok(())
     }
 
@@ -98,7 +98,7 @@ impl<'db> MutableTransaction<'db> {
         }
         let mut db_key = vec![3];
         db_key.extend_from_slice(code_hash.as_bytes());
-        Ok(self.tx.get(&db_key)?)
+        self.tx.get(&db_key)
     }
 
     pub fn set_account(&mut self, address: H160, account: Option<Account>) {
@@ -172,8 +172,7 @@ impl<'db> MutableTransaction<'db> {
                 }
 
                 for address in self.destroyed_storage.iter() {
-                    let mut db_prefix = Vec::new();
-                    db_prefix.push(1);
+                    let mut db_prefix = vec![1];
                     db_prefix.extend_from_slice(address.as_bytes());
                     self.tx.clear_prefix(&db_prefix)?;
                     db_prefix.clear();
@@ -226,7 +225,7 @@ impl<'db> MutableTransaction<'db> {
     }
 
     pub fn storage_root(&mut self, address: &H160) -> anyhow::Result<H256> {
-        let storage = self.storage.remove(&address).unwrap_or_default();
+        let storage = self.storage.remove(address).unwrap_or_default();
         let mut dirty_storage: Vec<(NibbleList, Option<SmallVec<[u8; 36]>>)> = Vec::new();
         for (key, value) in storage.iter() {
             if value.is_zero() {
