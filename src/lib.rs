@@ -15,6 +15,8 @@ use crate::structs::{get_internal_key, marshal_storage, unmarshal_storage, Nibbl
 pub use crate::util::{keccak256, EMPTY_CODE_HASH};
 use crate::walk::Walker;
 
+pub static DB_VERSION: &[u8] = b"0";
+
 pub struct DB {
     backend: Backend,
 }
@@ -24,10 +26,11 @@ impl DB {
         std::fs::create_dir_all(path)?;
         let backend = Backend::open(path)?;
 
-        /*
-        let mut tx = res.begin_mutable()?;
+        let mut self_ = Self { backend };
+
+        let mut tx = self_.begin_mutable()?;
         match tx.get_metadata(b"version")? {
-            None => anyhow::ensure!(create_if_not_existing, "Database missing version"),
+            None => tx.set_metadata(b"version", DB_VERSION)?,
             Some(version) => anyhow::ensure!(
                 version == DB_VERSION,
                 "Wrong DB_VERSION expected: {:?}, got: {:?}",
@@ -35,11 +38,9 @@ impl DB {
                 version,
             ),
         }
-        tx.set_metadata(b"version", DB_VERSION)?;
         tx.commit()?;
-        */
 
-        Ok(Self { backend })
+        Ok(self_)
     }
 
     pub fn open_in_memory() -> anyhow::Result<Self> {
