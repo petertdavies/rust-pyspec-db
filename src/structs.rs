@@ -178,15 +178,23 @@ impl InternalNode {
                     if subnode.is_empty() {
                         s.append_empty_data()
                     } else {
-                        s.append(&subnode.as_slice())
+                        if subnode.len() < 32 {
+                            s.append_raw(&subnode.as_slice(), 1)
+                        } else {
+                            s.append(&subnode.as_slice())
+                        }
                     };
                 }
                 s.append_empty_data();
                 let branch_node = hash_if_long(&s.out());
                 if extension_nibbles.len() != 0 {
                     let mut s = RlpStream::new_list(2);
-                    s.append(&hp_encode_nibble_list(extension_nibbles, false).as_slice())
-                        .append(&branch_node.as_slice());
+                    if branch_node.len() < 32 {
+                        s.append_raw(&branch_node.as_slice(), 1);
+                    } else {
+                        s.append(&hp_encode_nibble_list(extension_nibbles, false).as_slice())
+                            .append(&branch_node.as_slice());
+                    }
                     hash_if_long(&s.out())
                 } else {
                     branch_node
@@ -302,7 +310,9 @@ mod tests {
 
     #[test]
     fn test_marshal_storage() {
-        let value = U256::from(15897243 as u64);
-        assert_eq!(value, unmarshal_storage(&marshal_storage(value)));
+        for i in 1..2_000_000 {
+            let value = U256::from(i);
+            assert_eq!(value, unmarshal_storage(&marshal_storage(value)));
+        }
     }
 }

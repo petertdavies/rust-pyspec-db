@@ -1,74 +1,129 @@
+use std::borrow::Cow;
 use std::ops::Bound::{Excluded, Unbounded};
 
 use anyhow;
 use arrayvec::ArrayVec;
+use libmdbx::{Environment, EnvironmentFlags, Geometry, Transaction, WriteFlags, WriteMap, RW};
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
 
 use crate::structs::InternalNode;
 
-pub enum Backend {
-    InMemory(BTreeMap<ArrayVec<u8, 96>, SmallVec<[u8; 128]>>),
+pub struct Backend {
+    cache: BTreeMap<ArrayVec<u8, 96>, Option<SmallVec<[u8; 128]>>>,
+    disk: Option<Environment<WriteMap>>,
 }
 
 impl Backend {
     pub fn open_in_memory() -> anyhow::Result<Self> {
-        Ok(Self::InMemory(BTreeMap::new()))
+        Ok(Self {
+            cache: BTreeMap::new(),
+            disk: None,
+        })
     }
 
-    pub fn begin_mutable(&mut self) -> anyhow::Result<BackendTransaction> {
-        match self {
-            Self::InMemory(btree) => Ok(BackendTransaction::InMemory(btree)),
-        }
+    pub fn open(path: &std::path::Path) -> anyhow::Result<Self> {
+        let mut builder = Environment::<WriteMap>::new();
+        builder.set_flags(EnvironmentFlags {
+            exclusive: true,
+            ..EnvironmentFlags::default()
+        });
+        builder.set_geometry(Geometry {
+            size: Some(0..(2 as usize).pow(40)),
+            growth_step: Some((2 as isize).pow(20)),
+            ..Geometry::default()
+        });
+        Ok(Self {
+            cache: BTreeMap::new(),
+            disk: Some(builder.open(path)?),
+        })
+    }
+
+    pub fn begin_mutable<'txn>(&'txn mut self) -> anyhow::Result<BackendTransaction<'txn>> {
+        Ok(match &self.disk {
+            None => BackendTransaction {
+                cache: &mut self.cache,
+                txn: None,
+            },
+            Some(disk) => {
+                let txn = disk.begin_rw_txn()?;
+                BackendTransaction {
+                    cache: &mut self.cache,
+                    txn: Some(txn),
+                }
+            }
+        })
     }
 }
 
-pub enum BackendTransaction<'txn> {
-    InMemory(&'txn mut BTreeMap<ArrayVec<u8, 96>, SmallVec<[u8; 128]>>),
+pub struct BackendTransaction<'txn> {
+    cache: &'txn mut BTreeMap<ArrayVec<u8, 96>, Option<SmallVec<[u8; 128]>>>,
+    txn: Option<Transaction<'txn, RW, WriteMap>>,
 }
 
 impl<'txn> BackendTransaction<'txn> {
-    pub fn get(&self, key: &[u8]) -> anyhow::Result<Option<&[u8]>> {
-        match self {
-            Self::InMemory(btree) => Ok(btree.get(key).map(|x| x.as_slice())),
-        }
+    pub fn get(&'txn self, key: &[u8]) -> anyhow::Result<Option<Cow<'txn, [u8]>>> {
+        Ok(if let Some(value) = self.cache.get(key) {
+            match value {
+                None => None,
+                Some(value) => Some(Cow::from(value.as_slice())),
+            }
+        } else {
+            match &self.txn {
+                None => None,
+                Some(txn) => txn.get(&txn.open_db(None)?, key)?,
+            }
+        })
     }
 
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> anyhow::Result<()> {
-        match self {
-            Self::InMemory(btree) => {
-                btree.insert(key.try_into()?, SmallVec::from_slice(value));
-                Ok(())
-            }
-        }
+        self.cache
+            .insert(key.try_into()?, Some(SmallVec::from_slice(value)));
+        Ok(())
     }
 
     pub fn delete(&mut self, key: &[u8]) -> anyhow::Result<()> {
-        match self {
-            Self::InMemory(btree) => {
-                btree.remove(key);
-                Ok(())
-            }
-        }
+        self.cache.insert(key.try_into()?, None);
+        Ok(())
     }
 
     pub fn clear_prefix(&mut self, prefix: &[u8]) -> anyhow::Result<()> {
-        match self {
-            Self::InMemory(btree) => {
-                let to_delete: Vec<_> = btree
-                    .range((Excluded(ArrayVec::<u8, 96>::try_from(prefix)?), Unbounded))
-                    .map(|x| x.0)
-                    .take_while(|x| x.starts_with(prefix))
-                    .cloned()
-                    .collect();
-                for key in to_delete {
-                    btree.remove(&key);
+        let to_delete: Vec<_> = self
+            .cache
+            .range((Excluded(ArrayVec::<u8, 96>::try_from(prefix)?), Unbounded))
+            .map(|x| x.0)
+            .take_while(|x| x.starts_with(prefix))
+            .cloned()
+            .collect();
+        for key in to_delete {
+            self.cache.remove(&key);
+        }
+        if let Some(txn) = &self.txn {
+            let mut cursor = txn.cursor(&txn.open_db(None)?)?;
+            let ((), ()) = match cursor.set_range(prefix)? {
+                Some(x) => x,
+                None => return Ok(()),
+            };
+            loop {
+                match cursor.next()? {
+                    None => break,
+                    Some(((), ())) => {}
                 }
-                Ok(())
+                match cursor.get_current::<Cow<[u8]>, ()>()? {
+                    None => break,
+                    Some((key, ())) => {
+                        if !key.starts_with(prefix) {
+                            break;
+                        }
+                    }
+                };
+                cursor.del(WriteFlags::default())?;
             }
         }
+        Ok(())
     }
 
+    /*
     pub fn debug_dump_db(&self) {
         match self {
             Self::InMemory(btree) => {
@@ -84,8 +139,28 @@ impl<'txn> BackendTransaction<'txn> {
             }
         }
     }
+    */
 
     pub fn commit(self) -> anyhow::Result<()> {
-        anyhow::bail!("Cannot commit a memory DB")
+        match self.txn {
+            None => Ok(()),
+            Some(txn) => {
+                let db = txn.open_db(None)?;
+                let mut cursor = txn.cursor(&db)?;
+                for (key, value) in self.cache.iter() {
+                    if let Some(value) = value {
+                        cursor.put(key, value, WriteFlags::default())?;
+                    } else {
+                        let x: Option<()> = cursor.set(&key)?;
+                        if x.is_some() {
+                            txn.del(&db, key, None)?;
+                        }
+                    }
+                }
+                self.cache.clear();
+                txn.commit()?;
+                Ok(())
+            }
+        }
     }
 }

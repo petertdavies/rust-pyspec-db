@@ -6,6 +6,7 @@ pub mod walk;
 use ethereum_types::{H160, H256, U256};
 use rlp::RlpStream;
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use crate::backend::{Backend, BackendTransaction};
@@ -19,32 +20,11 @@ pub struct DB {
 }
 
 impl DB {
-    /*
     pub fn open(path: &std::path::Path) -> anyhow::Result<Self> {
-        Self::open_internal(path, true, false)
-    }
-
-    pub fn create(path: &std::path::Path, allow_existing: bool) -> anyhow::Result<Self> {
-        Self::open_internal(path, allow_existing, true)
-    }
-
-    fn open_internal(
-        path: &std::path::Path,
-        allow_existing: bool,
-        create_if_not_existing: bool,
-    ) -> anyhow::Result<Self> {
-        assert!(allow_existing || create_if_not_existing);
         std::fs::create_dir_all(path)?;
-        let env = Environment::new()
-            .set_map_size(usize::pow(2, 40))
-            .open(path)?;
-        let db = if create_if_not_existing {
-            env.create_db(None, DatabaseFlags::empty())?
-        } else {
-            env.open_db(None)?
-        };
-        let res = DB { env, db };
+        let backend = Backend::open(path)?;
 
+        /*
         let mut tx = res.begin_mutable()?;
         match tx.get_metadata(b"version")? {
             None => anyhow::ensure!(create_if_not_existing, "Database missing version"),
@@ -57,8 +37,10 @@ impl DB {
         }
         tx.set_metadata(b"version", DB_VERSION)?;
         tx.commit()?;
-        Ok(res)
-    */
+        */
+
+        Ok(Self { backend })
+    }
 
     pub fn open_in_memory() -> anyhow::Result<Self> {
         Ok(Self {
@@ -84,10 +66,10 @@ pub struct MutableTransaction<'db> {
 }
 
 impl<'db> MutableTransaction<'db> {
-    pub fn get_metadata(&self, key: &[u8]) -> anyhow::Result<Option<&[u8]>> {
+    pub fn get_metadata(&self, key: &[u8]) -> anyhow::Result<Option<Cow<[u8]>>> {
         let mut db_key = vec![0];
         db_key.extend_from_slice(key);
-        self.tx.get(&db_key)
+        Ok(self.tx.get(&db_key)?)
     }
 
     pub fn set_metadata(&mut self, key: &[u8], val: &[u8]) -> anyhow::Result<()> {
@@ -110,9 +92,9 @@ impl<'db> MutableTransaction<'db> {
         Ok(code_hash)
     }
 
-    pub fn get_code(&mut self, code_hash: H256) -> anyhow::Result<Option<&[u8]>> {
+    pub fn get_code(&mut self, code_hash: H256) -> anyhow::Result<Option<Cow<[u8]>>> {
         if code_hash == *EMPTY_CODE_HASH {
-            return Ok(Some(&[]));
+            return Ok(Some(Cow::Borrowed(&[])));
         }
         let mut db_key = vec![3];
         db_key.extend_from_slice(code_hash.as_bytes());
@@ -131,7 +113,7 @@ impl<'db> MutableTransaction<'db> {
             db_key.extend_from_slice(address.as_bytes());
             match self.tx.get(&db_key)? {
                 None => Ok(None),
-                Some(data) => Ok(Some(Account::unmarshal(data))),
+                Some(data) => Ok(Some(Account::unmarshal(&data))),
             }
         }
     }
@@ -166,7 +148,7 @@ impl<'db> MutableTransaction<'db> {
         db_key.extend_from_slice(key.as_bytes());
         match self.tx.get(&db_key)? {
             None => Ok(U256::zero()),
-            Some(data) => Ok(unmarshal_storage(data)),
+            Some(data) => Ok(unmarshal_storage(&data)),
         }
     }
 
@@ -269,9 +251,10 @@ impl<'db> MutableTransaction<'db> {
         self.tx.commit()?;
         Ok(())
     }
-
+    /*
     pub fn debug_dump_db(&mut self) -> anyhow::Result<()> {
         self.tx.debug_dump_db();
         Ok(())
     }
+    */
 }

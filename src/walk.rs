@@ -13,14 +13,14 @@ pub static EMPTY_TRIE_ROOT: Lazy<H256> = Lazy::new(|| {
     H256::from_str("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421").unwrap()
 });
 
-pub struct Walker<'db, 'txn, 'a> {
+pub struct Walker<'a, 'db, 'txn> {
     prefix: &'a [u8],
     dirty_list: Vec<(NibbleList, Option<SmallVec<[u8; 36]>>)>,
     tx: &'txn mut BackendTransaction<'db>,
     nibble_list: NibbleList,
 }
 
-impl<'db, 'txn, 'a> Walker<'db, 'txn, 'a> {
+impl<'db, 'txn, 'a> Walker<'a, 'db, 'txn> {
     pub fn new(
         trie_prefix: &'a [u8],
         dirty_list: Vec<(NibbleList, Option<SmallVec<[u8; 36]>>)>,
@@ -237,7 +237,7 @@ impl<'db, 'txn, 'a> Walker<'db, 'txn, 'a> {
     fn get_node(&self) -> anyhow::Result<Option<InternalNode>> {
         let mut db_key = self.prefix.to_vec();
         db_key.extend_from_slice(&nibble_list_to_key(&self.nibble_list));
-        Ok(self.tx.get(&db_key)?.map(InternalNode::unmarshal))
+        Ok(self.tx.get(&db_key)?.map(|x| InternalNode::unmarshal(&x)))
     }
 
     fn write_node(&mut self, node: Option<InternalNode>) -> anyhow::Result<ArrayVec<u8, 32>> {
