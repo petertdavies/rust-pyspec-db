@@ -8,6 +8,7 @@ use rlp::RlpStream;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::fs::{remove_dir, remove_file};
 
 use crate::backend::{Backend, BackendTransaction};
 pub use crate::structs::Account;
@@ -41,6 +42,28 @@ impl DB {
         tx.commit()?;
 
         Ok(self_)
+    }
+
+    pub fn delete_db(path: &std::path::Path) -> anyhow::Result<()> {
+        if path.exists() {
+            for dir_entry in path.read_dir()? {
+                let dir_entry = dir_entry?;
+                if ["mdbx.dat", "mdbx.lck"].contains(
+                    &dir_entry
+                        .path()
+                        .file_name()
+                        .unwrap()
+                        .to_str()
+                        .ok_or(anyhow::anyhow!("Failed to decode filename"))?,
+                ) {
+                    remove_file(dir_entry.path())?;
+                } else {
+                    anyhow::bail!("Unexpected file in DB: {}", dir_entry.path().display());
+                }
+            }
+            remove_dir(path)?;
+        }
+        Ok(())
     }
 
     pub fn open_in_memory() -> anyhow::Result<Self> {
