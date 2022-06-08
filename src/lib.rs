@@ -176,9 +176,14 @@ impl<'db> MutableTransaction<'db> {
         }
     }
 
-    pub fn destroy_storage(&mut self, address: H160) {
+    pub fn destroy_storage(&mut self, address: H160) -> anyhow::Result<()> {
         self.destroyed_storage.insert(address);
         self.storage.remove(&address);
+        if !self.accounts.contains_key(&address) {
+            let account = self.get_account_optional(address)?;
+            self.set_account(address, account);
+        };
+        Ok(())
     }
 
     pub fn state_root(&mut self) -> anyhow::Result<H256> {
@@ -194,40 +199,17 @@ impl<'db> MutableTransaction<'db> {
                         None => self.tx.delete(&key)?,
                     };
                 }
-
-                for address in self.destroyed_storage.iter() {
-                    let mut db_prefix = vec![1];
-                    db_prefix.extend_from_slice(address.as_bytes());
-                    self.tx.clear_prefix(&db_prefix)?;
-                    db_prefix.clear();
-                    db_prefix.push(2);
-                    db_prefix.extend_from_slice(&get_internal_key(address));
-                    self.tx.clear_prefix(&db_prefix)?;
-                    self.tx.delete(&db_prefix)?;
-                }
-
-                for (address, map) in self.storage.iter() {
-                    for (key, value) in map.iter() {
-                        let mut db_key: Vec<u8> = vec![1];
-                        db_key.extend_from_slice(address.as_bytes());
-                        db_key.extend_from_slice(key.as_bytes());
-                        if value.is_zero() {
-                            self.tx.delete(&db_key)?
-                        } else {
-                            self.tx.put(&db_key, &marshal_storage(*value))?;
-                        }
-                    }
-                }
             }
 
             let mut dirty_list = Vec::new();
-            for (address, account) in std::mem::take(&mut self.accounts) {
+            for (address, account) in std::mem::take(&mut self.accounts).drain() {
                 let internal_address = get_internal_key(address);
+                let storage_root = self.storage_root(&address)?;
                 if let Some(account) = account {
                     let mut s = RlpStream::new_list(4);
                     s.append(&account.nonce)
                         .append(&account.balance)
-                        .append(&self.storage_root(&address)?)
+                        .append(&storage_root)
                         .append(&account.code_hash);
                     dirty_list.push((internal_address, Some(SmallVec::from_slice(&s.out()))));
                 } else {
@@ -241,23 +223,44 @@ impl<'db> MutableTransaction<'db> {
 
             let root = walker.root()?;
 
-            self.accounts = HashMap::new();
-            self.storage = HashMap::new();
+            assert!(self.accounts.is_empty());
+            assert!(self.storage.is_empty());
+            assert!(self.destroyed_storage.is_empty());
 
             Ok(root)
         }
     }
 
     pub fn storage_root(&mut self, address: &H160) -> anyhow::Result<H256> {
-        let storage = self.storage.remove(address).unwrap_or_default();
+        if self.destroyed_storage.remove(address) {
+            let mut db_prefix = vec![1];
+            db_prefix.extend_from_slice(address.as_bytes());
+            self.tx.clear_prefix(&db_prefix)?;
+            db_prefix.clear();
+            db_prefix.push(2);
+            db_prefix.extend_from_slice(&get_internal_key(address));
+            self.tx.clear_prefix(&db_prefix)?;
+            self.tx.delete(&db_prefix)?;
+        }
+
+        let mut storage = self.storage.remove(address).unwrap_or_default();
         let mut dirty_storage: Vec<(NibbleList, Option<SmallVec<[u8; 36]>>)> = Vec::new();
-        for (key, value) in storage.iter() {
+        for (key, value) in storage.drain() {
+            let mut db_key: Vec<u8> = vec![1];
+            db_key.extend_from_slice(address.as_bytes());
+            db_key.extend_from_slice(key.as_bytes());
+            if value.is_zero() {
+                self.tx.delete(&db_key)?
+            } else {
+                self.tx.put(&db_key, &marshal_storage(value))?;
+            }
+
             if value.is_zero() {
                 dirty_storage.push((get_internal_key(key), None));
             } else {
                 dirty_storage.push((
                     get_internal_key(key),
-                    Some(SmallVec::from_slice(&rlp::encode(value))),
+                    Some(SmallVec::from_slice(&rlp::encode(&value))),
                 ));
             }
         }
