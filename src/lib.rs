@@ -18,19 +18,19 @@ use crate::walk::Walker;
 
 pub static DB_VERSION: &[u8] = b"0";
 
-pub struct DB {
+pub struct Db {
     backend: Backend,
 }
 
-impl DB {
-    pub fn open(path: &std::path::Path) -> anyhow::Result<Self> {
+impl Db {
+    pub fn file(path: &std::path::Path) -> anyhow::Result<Self> {
         std::fs::create_dir_all(path)?;
-        let backend = Backend::open(path)?;
+        let backend = Backend::file(path)?;
 
         let mut self_ = Self { backend };
 
-        let mut tx = self_.begin_mutable()?;
-        match tx.get_metadata(b"version")? {
+        let mut tx = self_.begin_mut()?;
+        match tx.metadata(b"version")? {
             None => tx.set_metadata(b"version", DB_VERSION)?,
             Some(version) => anyhow::ensure!(
                 version == DB_VERSION,
@@ -44,7 +44,13 @@ impl DB {
         Ok(self_)
     }
 
-    pub fn delete_db(path: &std::path::Path) -> anyhow::Result<()> {
+    pub fn memory() -> anyhow::Result<Self> {
+        Ok(Self {
+            backend: Backend::memory()?,
+        })
+    }
+
+    pub fn delete(path: &std::path::Path) -> anyhow::Result<()> {
         if path.exists() {
             for dir_entry in path.read_dir()? {
                 let dir_entry = dir_entry?;
@@ -66,15 +72,9 @@ impl DB {
         Ok(())
     }
 
-    pub fn open_in_memory() -> anyhow::Result<Self> {
-        Ok(Self {
-            backend: Backend::open_in_memory()?,
-        })
-    }
-
-    pub fn begin_mutable(&mut self) -> anyhow::Result<MutableTransaction<'_>> {
+    pub fn begin_mut(&mut self) -> anyhow::Result<MutableTransaction<'_>> {
         Ok(MutableTransaction {
-            tx: self.backend.begin_mutable()?,
+            tx: self.backend.begin_mut()?,
             accounts: HashMap::new(),
             storage: HashMap::new(),
             destroyed_storage: HashSet::new(),
@@ -90,7 +90,7 @@ pub struct MutableTransaction<'db> {
 }
 
 impl<'db> MutableTransaction<'db> {
-    pub fn get_metadata(&self, key: &[u8]) -> anyhow::Result<Option<Cow<[u8]>>> {
+    pub fn metadata(&self, key: &[u8]) -> anyhow::Result<Option<Cow<[u8]>>> {
         let mut db_key = vec![0];
         db_key.extend_from_slice(key);
         self.tx.get(&db_key)
@@ -116,7 +116,7 @@ impl<'db> MutableTransaction<'db> {
         Ok(code_hash)
     }
 
-    pub fn get_code(&mut self, code_hash: H256) -> anyhow::Result<Option<Cow<[u8]>>> {
+    pub fn code_from_hash(&mut self, code_hash: H256) -> anyhow::Result<Option<Cow<[u8]>>> {
         if code_hash == *EMPTY_CODE_HASH {
             return Ok(Some(Cow::Borrowed(&[])));
         }
@@ -129,7 +129,7 @@ impl<'db> MutableTransaction<'db> {
         self.accounts.insert(address, account);
     }
 
-    pub fn get_account_optional(&mut self, address: H160) -> anyhow::Result<Option<Account>> {
+    pub fn try_account(&mut self, address: H160) -> anyhow::Result<Option<Account>> {
         if let Some(account) = self.accounts.get(&address) {
             Ok(account.clone())
         } else {
@@ -147,7 +147,7 @@ impl<'db> MutableTransaction<'db> {
             map.insert(key, value);
             Ok(())
         } else {
-            let account = self.get_account_optional(address)?;
+            let account = self.try_account(address)?;
             anyhow::ensure!(
                 account.is_some(),
                 "Attempted to set storage on non-existent account {:?}",
@@ -161,7 +161,7 @@ impl<'db> MutableTransaction<'db> {
         }
     }
 
-    pub fn get_storage(&self, address: H160, key: H256) -> anyhow::Result<U256> {
+    pub fn storage(&self, address: H160, key: H256) -> anyhow::Result<U256> {
         if let Some(map) = self.storage.get(&address) {
             if let Some(val) = map.get(&key) {
                 return Ok(*val);
@@ -180,7 +180,7 @@ impl<'db> MutableTransaction<'db> {
         self.destroyed_storage.insert(address);
         self.storage.remove(&address);
         if !self.accounts.contains_key(&address) {
-            let account = self.get_account_optional(address)?;
+            let account = self.try_account(address)?;
             self.set_account(address, account);
         };
         Ok(())
@@ -277,10 +277,4 @@ impl<'db> MutableTransaction<'db> {
         self.tx.commit()?;
         Ok(())
     }
-    /*
-    pub fn debug_dump_db(&mut self) -> anyhow::Result<()> {
-        self.tx.debug_dump_db();
-        Ok(())
-    }
-    */
 }

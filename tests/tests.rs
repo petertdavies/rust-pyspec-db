@@ -63,24 +63,24 @@ static TESTS: &[&[(&[u8], &Lazy<Option<Account>>)]] = &[
     &[(&[3, 0, 0, 1, 0, 0], &LAZY_NONE)],
 ];
 
-fn with_memory<T>(f: impl for<'a> FnOnce(&'a mut DB) -> T) -> T {
-    let mut db = DB::open_in_memory().unwrap();
+fn with_memory<T>(f: impl for<'a> FnOnce(&'a mut Db) -> T) -> T {
+    let mut db = Db::memory().unwrap();
     let res = f(&mut db);
     res
 }
 
-fn with_temp_db<T>(f: impl for<'a> FnOnce(&'a mut DB) -> T) -> T {
+fn with_temp_db<T>(f: impl for<'a> FnOnce(&'a mut Db) -> T) -> T {
     let dir = tempfile::tempdir().unwrap();
-    let mut db = DB::open_in_memory().unwrap();
+    let mut db = Db::memory().unwrap();
     let res = f(&mut db);
     dir.close().unwrap();
     res
 }
 
-fn do_tests<'env>(db: &mut DB) {
+fn do_tests<'env>(db: &mut Db) {
     let mut trie_contents = HashMap::<Address, Account>::new();
     for test in TESTS {
-        let mut txn = db.begin_mutable().unwrap();
+        let mut txn = db.begin_mut().unwrap();
         for (prefix_nibbles, account) in *test {
             let address = get_address_with_prefix_nibbles(prefix_nibbles);
             txn.set_account(address, (**account).clone());
@@ -113,12 +113,12 @@ fn nonrandom_with_temp_db() {
 
 const NUM_RANDOM_TESTS: usize = 1000;
 
-fn do_random_tests(db: &mut DB) {
+fn do_random_tests(db: &mut Db) {
     // Use a deterministic RNG
     let mut rng = ChaCha8Rng::seed_from_u64(0);
     let mut trie_contents = HashMap::<Address, Account>::new();
     for _ in 0..NUM_RANDOM_TESTS {
-        let mut txn = db.begin_mutable().unwrap();
+        let mut txn = db.begin_mut().unwrap();
         loop {
             let (address, account) = gen_op(&trie_contents, &mut rng);
             txn.set_account(address, account.clone());

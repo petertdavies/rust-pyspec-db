@@ -3,7 +3,9 @@ use std::ops::Bound::{Excluded, Unbounded};
 
 use anyhow;
 use arrayvec::ArrayVec;
-use libmdbx::{Environment, EnvironmentFlags, Geometry, Transaction, WriteFlags, WriteMap, RW};
+use libmdbx::{
+    Environment, EnvironmentFlags, Geometry, Mode, SyncMode, Transaction, WriteFlags, WriteMap, RW,
+};
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
 
@@ -13,14 +15,14 @@ pub struct Backend {
 }
 
 impl Backend {
-    pub fn open_in_memory() -> anyhow::Result<Self> {
+    pub fn memory() -> anyhow::Result<Self> {
         Ok(Self {
             cache: BTreeMap::new(),
             disk: None,
         })
     }
 
-    pub fn open(path: &std::path::Path) -> anyhow::Result<Self> {
+    pub fn file(path: &std::path::Path) -> anyhow::Result<Self> {
         let mut builder = Environment::<WriteMap>::new();
         builder.set_flags(EnvironmentFlags {
             exclusive: true,
@@ -37,7 +39,7 @@ impl Backend {
         })
     }
 
-    pub fn begin_mutable(&mut self) -> anyhow::Result<BackendTransaction> {
+    pub fn begin_mut(&mut self) -> anyhow::Result<BackendTransaction> {
         Ok(match &self.disk {
             None => BackendTransaction {
                 cache: &mut self.cache,
@@ -117,24 +119,6 @@ impl<'txn> BackendTransaction<'txn> {
         }
         Ok(())
     }
-
-    /*
-    pub fn debug_dump_db(&self) {
-        match self {
-            Self::InMemory(btree) => {
-                println!("==START DEBUG DUMP==");
-                for (key, value) in btree.iter() {
-                    if key[0] == 2 {
-                        println!("{:?}: {:?}", key, InternalNode::unmarshal(value))
-                    } else {
-                        println!("{:?}: {:?}", key, value)
-                    }
-                }
-                println!("==END DEBUG DUMP==");
-            }
-        }
-    }
-    */
 
     pub fn commit(self) -> anyhow::Result<()> {
         match self.txn {
