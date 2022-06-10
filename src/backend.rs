@@ -26,6 +26,9 @@ impl Backend {
         let mut builder = Environment::<WriteMap>::new();
         builder.set_flags(EnvironmentFlags {
             exclusive: true,
+            mode: Mode::ReadWrite {
+                sync_mode: SyncMode::SafeNoSync,
+            },
             ..EnvironmentFlags::default()
         });
         builder.set_geometry(Geometry {
