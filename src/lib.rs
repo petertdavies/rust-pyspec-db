@@ -227,6 +227,7 @@ impl<'db> MutableTransaction<'db> {
             assert!(self.storage.is_empty());
             assert!(self.destroyed_storage.is_empty());
 
+            self.tx.flush()?;
             Ok(root)
         }
     }

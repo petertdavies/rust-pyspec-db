@@ -123,8 +123,8 @@ impl<'txn> BackendTransaction<'txn> {
         Ok(())
     }
 
-    pub fn commit(self) -> anyhow::Result<()> {
-        match self.txn {
+    pub fn flush(&mut self) -> anyhow::Result<()> {
+        match &self.txn {
             None => Ok(()),
             Some(txn) => {
                 let db = txn.open_db(None)?;
@@ -139,7 +139,16 @@ impl<'txn> BackendTransaction<'txn> {
                         }
                     }
                 }
-                self.cache.clear();
+                Ok(())
+            }
+        }
+    }
+
+    pub fn commit(mut self) -> anyhow::Result<()> {
+        self.flush()?;
+        match self.txn {
+            None => Ok(()),
+            Some(txn) => {
                 txn.commit()?;
                 Ok(())
             }
