@@ -139,6 +139,7 @@ impl<'txn> BackendTransaction<'txn> {
                         }
                     }
                 }
+                self.cache.clear();
                 Ok(())
             }
         }
