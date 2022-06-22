@@ -7,7 +7,7 @@ use libmdbx::{
     Environment, EnvironmentFlags, Geometry, Mode, SyncMode, Transaction, WriteFlags, WriteMap, RW,
 };
 use smallvec::SmallVec;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub struct Backend {
     cache: BTreeMap<ArrayVec<u8, 96>, Option<SmallVec<[u8; 128]>>>,
@@ -46,12 +46,14 @@ impl Backend {
         Ok(match &self.disk {
             None => BackendTransaction {
                 cache: &mut self.cache,
+                cleared_prefixes: BTreeSet::new(),
                 txn: None,
             },
             Some(disk) => {
                 let txn = disk.begin_rw_txn()?;
                 BackendTransaction {
                     cache: &mut self.cache,
+                    cleared_prefixes: BTreeSet::new(),
                     txn: Some(txn),
                 }
             }
@@ -61,6 +63,7 @@ impl Backend {
 
 pub struct BackendTransaction<'txn> {
     cache: &'txn mut BTreeMap<ArrayVec<u8, 96>, Option<SmallVec<[u8; 128]>>>,
+    cleared_prefixes: BTreeSet<ArrayVec<u8, 96>>,
     txn: Option<Transaction<'txn, RW, WriteMap>>,
 }
 
@@ -98,28 +101,7 @@ impl<'txn> BackendTransaction<'txn> {
         for key in to_delete {
             self.cache.remove(&key);
         }
-        if let Some(txn) = &self.txn {
-            let mut cursor = txn.cursor(&txn.open_db(None)?)?;
-            let ((), ()) = match cursor.set_range(prefix)? {
-                Some(x) => x,
-                None => return Ok(()),
-            };
-            loop {
-                match cursor.next()? {
-                    None => break,
-                    Some(((), ())) => {}
-                }
-                match cursor.get_current::<Cow<[u8]>, ()>()? {
-                    None => break,
-                    Some((key, ())) => {
-                        if !key.starts_with(prefix) {
-                            break;
-                        }
-                    }
-                };
-                cursor.del(WriteFlags::default())?;
-            }
-        }
+        self.cleared_prefixes.insert(ArrayVec::try_from(prefix)?);
         Ok(())
     }
 
@@ -129,6 +111,38 @@ impl<'txn> BackendTransaction<'txn> {
             Some(txn) => {
                 let db = txn.open_db(None)?;
                 let mut cursor = txn.cursor(&db)?;
+                for prefix in self.cleared_prefixes.iter() {
+                    let ((), ()) = match cursor.set_range(prefix)? {
+                        Some(x) => x,
+                        None => continue,
+                    };
+                    match cursor.get_current::<Cow<[u8]>, ()>()? {
+                        None => break,
+                        Some((key, _)) => {
+                            // Skip the prefix itself
+                            if key == prefix.as_slice() {
+                                cursor.next::<(), ()>()?;
+                            };
+                        }
+                    };
+                    loop {
+                        match cursor.get_current::<Cow<[u8]>, ()>()? {
+                            None => break,
+                            Some((key, ())) => {
+                                if !key.starts_with(prefix) {
+                                    break;
+                                }
+                            }
+                        };
+                        cursor.del(WriteFlags::default())?;
+                        match cursor.next()? {
+                            None => break,
+                            Some(((), ())) => {}
+                        }
+                    }
+                }
+                self.cleared_prefixes.clear();
+
                 for (key, value) in self.cache.iter() {
                     if let Some(value) = value {
                         cursor.put(key, value, WriteFlags::default())?;
