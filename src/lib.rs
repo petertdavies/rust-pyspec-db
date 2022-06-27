@@ -167,6 +167,9 @@ impl<'db> MutableTransaction<'db> {
                 return Ok(*val);
             }
         }
+        if self.destroyed_storage.contains(&address) {
+            return Ok(U256::zero());
+        }
         let mut db_key = vec![1];
         db_key.extend_from_slice(address.as_bytes());
         db_key.extend_from_slice(key.as_bytes());
