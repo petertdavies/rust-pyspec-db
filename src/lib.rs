@@ -182,7 +182,7 @@ impl<'db> MutableTransaction<'db> {
     pub fn destroy_storage(&mut self, address: H160) -> anyhow::Result<()> {
         let mut trie_prefix = vec![2];
         trie_prefix.extend_from_slice(&get_internal_key(address));
-        if self.storage.contains_key(&address) && self.tx.get(&trie_prefix)?.is_none() {
+        if !self.storage.contains_key(&address) && self.tx.get(&trie_prefix)?.is_none() {
             // Account has no storage, do nothing
             return Ok(());
         }
